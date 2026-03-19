@@ -36,6 +36,12 @@ public class MailService {
     @Value("${app.frontend-url:}")
     private String frontendUrl;
 
+    @Value("${app.security.email-verification-minutes:30}")
+    private long emailVerificationMinutes;
+
+    @Value("${app.security.password-reset-minutes:15}")
+    private long passwordResetMinutes;
+
     @PostConstruct
     void normalizeMailCredentials() {
         if (mailSender instanceof JavaMailSenderImpl sender) {
@@ -51,6 +57,7 @@ public class MailService {
 
     public void sendVerificationEmail(String email, String token, String originHeader, String refererHeader) {
         String verificationLink = buildLink("verify", token, originHeader, refererHeader);
+        String verificationExpiryText = formatDuration(emailVerificationMinutes);
         String subject = "Verify your AuthX account";
         String textBody = """
                 Welcome to AuthX.
@@ -58,8 +65,10 @@ public class MailService {
                 Verify your email by opening the link below:
                 %s
 
+                This link expires in %s and can only be used once.
+
                 If you did not create this account, you can ignore this email.
-                """.formatted(verificationLink);
+                """.formatted(verificationLink, verificationExpiryText);
         String htmlBody = """
                 <div style="font-family: Arial, sans-serif; color: #162033; line-height: 1.6;">
                   <h2 style="margin: 0 0 16px;">Verify your AuthX account</h2>
@@ -70,15 +79,17 @@ public class MailService {
                   </p>
                   <p>If the button does not work, open this link:</p>
                   <p><a href="%1$s">%1$s</a></p>
+                  <p>This link expires in %2$s and can only be used once.</p>
                   <p>If you did not create this account, you can ignore this email.</p>
                 </div>
-                """.formatted(verificationLink);
+                """.formatted(verificationLink, verificationExpiryText);
 
         sendEmail(email, subject, textBody, htmlBody);
     }
 
     public void sendPasswordResetEmail(String email, String token, String originHeader, String refererHeader) {
         String resetLink = buildLink("reset", token, originHeader, refererHeader);
+        String passwordResetExpiryText = formatDuration(passwordResetMinutes);
         String subject = "Reset your AuthX password";
         String textBody = """
                 We received a request to reset your AuthX password.
@@ -86,8 +97,10 @@ public class MailService {
                 Open the link below to choose a new password:
                 %s
 
+                This link expires in %s and can only be used once.
+
                 If you did not request a password reset, you can ignore this email.
-                """.formatted(resetLink);
+                """.formatted(resetLink, passwordResetExpiryText);
         String htmlBody = """
                 <div style="font-family: Arial, sans-serif; color: #162033; line-height: 1.6;">
                   <h2 style="margin: 0 0 16px;">Reset your AuthX password</h2>
@@ -98,9 +111,10 @@ public class MailService {
                   </p>
                   <p>If the button does not work, open this link:</p>
                   <p><a href="%1$s">%1$s</a></p>
+                  <p>This link expires in %2$s and can only be used once.</p>
                   <p>If you did not request a password reset, you can ignore this email.</p>
                 </div>
-                """.formatted(resetLink);
+                """.formatted(resetLink, passwordResetExpiryText);
 
         sendEmail(email, subject, textBody, htmlBody);
     }
@@ -186,5 +200,22 @@ public class MailService {
 
     private String normalizeBaseUrl(String url) {
         return url.endsWith("/") ? url : url + "/";
+    }
+
+    private String formatDuration(long minutes) {
+        if (minutes < 60) {
+            return minutes + (minutes == 1 ? " minute" : " minutes");
+        }
+
+        long hours = minutes / 60;
+        long remainingMinutes = minutes % 60;
+        if (remainingMinutes == 0) {
+            return hours + (hours == 1 ? " hour" : " hours");
+        }
+
+        return hours
+                + (hours == 1 ? " hour " : " hours ")
+                + remainingMinutes
+                + (remainingMinutes == 1 ? " minute" : " minutes");
     }
 }

@@ -37,4 +37,16 @@ public class User {
     private boolean isVerified;
 
     private LocalDateTime createdAt;
+
+    @Column(nullable = false)
+    @Builder.Default
+    private int failedLoginAttempts = 0;
+
+    private LocalDateTime lockedUntil;
+
+    @Column(name = "is_two_factor_enabled", nullable = false)
+    private boolean isTwoFactorEnabled = false;
+
+    @Column(name = "two_factor_secret")
+    private String twoFactorSecret;
 }

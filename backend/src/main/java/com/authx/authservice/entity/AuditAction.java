@@ -1,0 +1,18 @@
+package com.authx.authservice.entity;
+
+public enum AuditAction {
+    SIGNUP,
+    LOGIN_SUCCESS,
+    LOGIN_FAILURE,
+    LOGOUT,
+    EMAIL_VERIFIED,
+    PASSWORD_RESET,
+    SESSION_REVOKED,
+    ALL_SESSIONS_REVOKED,
+    ACCOUNT_LOCKED,
+    ACCOUNT_UNLOCKED,
+    TWO_FACTOR_ENABLED,
+    TWO_FACTOR_DISABLED,
+    TWO_FACTOR_FAILED,
+    TOKEN_REFRESHED
+}

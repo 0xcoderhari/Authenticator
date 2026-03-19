@@ -3,6 +3,7 @@ package com.authx.authservice.config;
 import com.authx.authservice.entity.User;
 import com.authx.authservice.repository.UserRepository;
 import com.authx.authservice.service.JwtService;
+import com.authx.authservice.service.RefreshTokenCookieService;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -27,6 +28,8 @@ public class JwtFilter extends OncePerRequestFilter {
 
     private final JwtService jwtService;
     private final UserRepository userRepository;
+    private final RefreshTokenCookieService refreshTokenCookieService;
+    private final com.authx.authservice.repository.RefreshTokenRepository refreshTokenRepository;
 
     @Override
     protected void doFilterInternal(
@@ -34,14 +37,7 @@ public class JwtFilter extends OncePerRequestFilter {
             HttpServletResponse response,
             FilterChain filterChain
     ) throws ServletException, IOException {
-        String authorizationHeader = request.getHeader(HttpHeaders.AUTHORIZATION);
-
-        if (authorizationHeader == null || !authorizationHeader.startsWith(BEARER_PREFIX)) {
-            filterChain.doFilter(request, response);
-            return;
-        }
-
-        String token = authorizationHeader.substring(BEARER_PREFIX.length()).trim();
+        String token = extractAccessToken(request);
         if (token.isEmpty() || SecurityContextHolder.getContext().getAuthentication() != null) {
             filterChain.doFilter(request, response);
             return;
@@ -50,14 +46,39 @@ public class JwtFilter extends OncePerRequestFilter {
         try {
             String username = jwtService.extractUsername(token);
             if (jwtService.validateToken(token)) {
-                userRepository.findByEmail(username)
-                        .ifPresent(user -> setAuthentication(request, user));
+                String sessionId = jwtService.extractSessionId(token);
+                boolean isValidSession = true;
+                
+                if (sessionId != null) {
+                    isValidSession = refreshTokenRepository.findBySessionId(sessionId)
+                            .map(rt -> rt.getRevokedAt() == null)
+                            .orElse(false);
+                }
+                
+                if (isValidSession) {
+                    userRepository.findByEmail(username)
+                            .ifPresent(user -> setAuthentication(request, user));
+                }
             }
         } catch (Exception exception) {
             SecurityContextHolder.clearContext();
         }
 
         filterChain.doFilter(request, response);
+    }
+
+    private String extractAccessToken(HttpServletRequest request) {
+        String cookieToken = refreshTokenCookieService.extractAccessToken(request);
+        if (cookieToken != null && !cookieToken.isBlank()) {
+            return cookieToken.trim();
+        }
+
+        String authorizationHeader = request.getHeader(HttpHeaders.AUTHORIZATION);
+        if (authorizationHeader == null || !authorizationHeader.startsWith(BEARER_PREFIX)) {
+            return "";
+        }
+
+        return authorizationHeader.substring(BEARER_PREFIX.length()).trim();
     }
 
     private void setAuthentication(HttpServletRequest request, User user) {
