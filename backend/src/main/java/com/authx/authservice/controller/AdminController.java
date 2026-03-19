@@ -2,6 +2,7 @@ package com.authx.authservice.controller;
 
 import com.authx.authservice.dto.AdminSessionResponse;
 import com.authx.authservice.dto.AuditLogResponse;
+import com.authx.authservice.dto.LockAccountRequest;
 import com.authx.authservice.dto.UserProfileResponse;
 import com.authx.authservice.entity.AuditLog;
 import com.authx.authservice.entity.RefreshToken;
@@ -12,8 +13,10 @@ import com.authx.authservice.service.AuditService;
 import com.authx.authservice.service.AuthService;
 import com.authx.authservice.service.RefreshTokenService;
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.LocalDateTime;
@@ -32,8 +35,15 @@ public class AdminController {
     private final AuthService authService;
 
     @GetMapping("/users")
-    public List<UserProfileResponse> users() {
-        return userRepository.findAll().stream()
+    public List<UserProfileResponse> users(@RequestParam(name = "q", required = false) String query) {
+        List<User> users;
+        if (query == null || query.isBlank()) {
+            users = userRepository.findAll();
+        } else {
+            users = userRepository.findTop50ByEmailContainingIgnoreCaseOrderByCreatedAtDesc(query.trim());
+        }
+
+        return users.stream()
                 .map(this::toProfileResponse)
                 .toList();
     }
@@ -80,12 +90,59 @@ public class AdminController {
         return Map.of("message", "Account unlocked.");
     }
 
+    @PostMapping("/users/{userId}/lock")
+    public Map<String, String> lockUser(
+            @PathVariable Long userId,
+            @Valid @RequestBody LockAccountRequest request,
+            Authentication authentication,
+            HttpServletRequest servletRequest
+    ) {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new IllegalArgumentException("User not found."));
+
+        String adminEmail = authentication.getName();
+        if (adminEmail.equals(user.getEmail())) {
+            throw new IllegalArgumentException("You cannot lock your own account.");
+        }
+
+        String type = request.getType().toLowerCase();
+        String ip = extractClientIp(servletRequest);
+        String agent = servletRequest.getHeader("User-Agent");
+
+        switch (type) {
+            case "permanent" -> {
+                authService.lockAccountPermanently(user, ip, agent);
+                return Map.of("message", "Account locked permanently.", "lockType", "permanent");
+            }
+            case "temporary" -> {
+                long duration = request.getDurationMinutes() != null ? request.getDurationMinutes() : 15;
+                authService.lockAccountTemporarily(user, duration, ip, agent);
+                return Map.of("message", "Account locked for " + duration + " minutes.", "lockType", "temporary");
+            }
+            default -> throw new IllegalArgumentException("Invalid lock type. Use 'temporary' or 'permanent'.");
+        }
+    }
+
     private UserProfileResponse toProfileResponse(User user) {
+        boolean isLocked = user.getLockedUntil() != null && user.getLockedUntil().isAfter(LocalDateTime.now());
+        String lockType = "none";
+        if (isLocked) {
+            if (user.getLockedUntil().getYear() >= 9999) {
+                lockType = "permanent";
+            } else if (user.getFailedLoginAttempts() >= 5) {
+                lockType = "auto";
+            } else {
+                lockType = "temporary";
+            }
+        }
         return UserProfileResponse.builder()
                 .id(user.getId())
                 .email(user.getEmail())
                 .role(user.getRole().name())
                 .verified(user.isVerified())
+                .isTwoFactorEnabled(user.isTwoFactorEnabled())
+                .locked(isLocked)
+                .lockType(lockType)
                 .createdAt(user.getCreatedAt())
                 .build();
     }

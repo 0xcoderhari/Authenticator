@@ -45,6 +45,7 @@ function App() {
   const [auditLogs, setAuditLogs] = useState({ content: [], totalPages: 0, number: 0 });
   const [auditPage, setAuditPage] = useState(0);
   const [dashLoading, setDashLoading] = useState(false);
+  const [adminUserQuery, setAdminUserQuery] = useState("");
 
   const isAuthenticated = Boolean(currentUser);
   const isAdmin = currentUser?.role === "ADMIN";
@@ -55,6 +56,30 @@ function App() {
   }, []);
 
   useEffect(() => { void restoreSession(); }, []);
+
+  // Initialize Google Identity Services
+  useEffect(() => {
+    const clientId = getGoogleClientId();
+    if (!clientId) return;
+
+    const script = document.createElement("script");
+    script.src = "https://accounts.google.com/gsi/client";
+    script.async = true;
+    script.defer = true;
+    script.onload = () => {
+      window.google.accounts.id.initialize({
+        client_id: clientId,
+        callback: (response) => {
+          if (response.credential) {
+            void handleGoogleLogin(response.credential);
+          }
+        },
+        auto_select: false,
+        cancel_on_tap_outside: true,
+      });
+    };
+    document.head.appendChild(script);
+  }, []);
 
   useEffect(() => {
     if (mode === "verify" && verificationToken) void handleVerifyEmail();
@@ -107,6 +132,15 @@ function App() {
     if (dashTab === "admin-sessions") void loadAdminSessions();
     if (dashTab === "admin-logs") void loadAuditLogs(0);
   }, [dashTab, isAuthenticated]);
+
+  // Debounced admin user search
+  useEffect(() => {
+    if (!isAuthenticated || !isAdmin || dashTab !== "admin-users") return;
+    const handle = setTimeout(() => {
+      void loadAdminUsers();
+    }, 300);
+    return () => clearTimeout(handle);
+  }, [adminUserQuery, isAuthenticated, isAdmin, dashTab]);
 
   function switchMode(nextMode) {
     setMode(nextMode);
@@ -184,11 +218,12 @@ function App() {
     setLoading(true); setError(""); setAuthMessage("");
     try {
       const email = normalizeEmail(loginForm.email);
+      const normalizedCode = normalizeOtpCode(twoFactorCode);
       const res = await fetch(buildApiUrl("/api/auth/verify-2fa"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ token: preAuthToken, code: twoFactorCode }),
+        body: JSON.stringify({ token: preAuthToken, code: normalizedCode }),
       });
       const data = await parseResponse(res);
       if (!res.ok) throw new Error(extractErrorMessage(data));
@@ -233,6 +268,22 @@ function App() {
       setResetToken("");
       setMode("login");
       setAuthMessage(typeof data === "string" ? data : "Password reset successful.");
+    } catch (err) { setError(err.message); } finally { setLoading(false); }
+  }
+
+  async function handleGoogleLogin(idToken) {
+    setLoading(true); setError(""); setAuthMessage("");
+    try {
+      const res = await fetch(buildApiUrl("/api/auth/google"), {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idToken }),
+      });
+      const data = await parseResponse(res);
+      if (!res.ok) throw new Error(extractErrorMessage(data));
+      await restoreSession();
+      setMode("dashboard");
     } catch (err) { setError(err.message); } finally { setLoading(false); }
   }
 
@@ -293,11 +344,12 @@ function App() {
     e.preventDefault();
     setLoading(true); setError(""); setAuthMessage("");
     try {
+      const normalizedCode = normalizeOtpCode(setupTwoFactorCode);
       const res = await fetch(buildApiUrl("/api/user/2fa/enable"), {
         method: "POST", 
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code: setupTwoFactorCode })
+        body: JSON.stringify({ code: normalizedCode })
       });
       const data = await parseResponse(res);
       if (!res.ok) throw new Error(extractErrorMessage(data));
@@ -305,14 +357,34 @@ function App() {
       setSetupTwoFactorCode("");
       await loadProfile(); // refresh profile to update isTwoFactorEnabled
       setAuthMessage("2-Factor Authentication enabled successfully.");
-    } catch (err) { setError(err.message); } finally { setLoading(false); }
+    } catch (err) {
+      const msg = (err?.message || "").toLowerCase();
+      if (msg.includes("already enabled")) {
+        // Backend says 2FA is already enabled — force UI into "enabled" state
+        setTwoFactorSetup(null);
+        setSetupTwoFactorCode("");
+        setProfile(prev => prev ? { ...prev, isTwoFactorEnabled: true } : prev);
+        setAuthMessage("2FA is already enabled on your account.");
+        setError("");
+      } else {
+        setError(err.message);
+      }
+    } finally { setLoading(false); }
   }
 
   async function handleDisable2Fa() {
     if (!window.confirm("Are you sure you want to disable 2-Factor Authentication?")) return;
+    const code = window.prompt("Enter the 6-digit code from your authenticator app to disable 2FA:");
+    if (!code) return;
     setLoading(true); setError(""); setAuthMessage("");
     try {
-      const res = await fetch(buildApiUrl("/api/user/2fa/disable"), { method: "POST", credentials: "include" });
+      const normalizedCode = normalizeOtpCode(code);
+      const res = await fetch(buildApiUrl("/api/user/2fa/disable"), {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: normalizedCode })
+      });
       const data = await parseResponse(res);
       if (!res.ok) throw new Error(extractErrorMessage(data));
       await loadProfile(); // refresh profile
@@ -366,7 +438,8 @@ function App() {
   async function loadAdminUsers() {
     setDashLoading(true);
     try {
-      const res = await fetch(buildApiUrl("/api/admin/users"), { credentials: "include" });
+      const qs = adminUserQuery ? `?q=${encodeURIComponent(adminUserQuery.trim())}` : "";
+      const res = await fetch(buildApiUrl(`/api/admin/users${qs}`), { credentials: "include" });
       if (res.ok) setAdminUsers(await res.json());
     } catch { /* ignore */ } finally { setDashLoading(false); }
   }
@@ -408,6 +481,28 @@ function App() {
         method: "POST", credentials: "include",
       });
       if (res.ok) void loadAdminUsers();
+    } catch { /* ignore */ }
+  }
+
+  async function lockUser(userId, type, durationMinutes) {
+    const confirmMsg = type === "permanent"
+      ? "Lock this account permanently? Only an admin can unlock it."
+      : `Lock this account for ${durationMinutes || 15} minutes?`;
+    if (!window.confirm(confirmMsg)) return;
+    try {
+      const body = { type };
+      if (type === "temporary") body.durationMinutes = durationMinutes || 15;
+      const res = await fetch(buildApiUrl(`/api/admin/users/${userId}/lock`), {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (res.ok) void loadAdminUsers();
+      else {
+        const data = await parseResponse(res);
+        setError(extractErrorMessage(data));
+      }
     } catch { /* ignore */ }
   }
 
@@ -466,7 +561,9 @@ function App() {
           {/* Top Bar */}
           <div className="top-bar">
             <div className="top-bar-left">
-              <div className="brand-mark-sm">AX</div>
+              <div className="brand-mark-sm">
+                <span className="lock-icon" aria-hidden="true" />
+              </div>
               <div>
                 <p className="eyebrow" style={{ margin: 0 }}>AuthX</p>
               </div>
@@ -545,9 +642,19 @@ function App() {
                           </p>
                         </div>
                         {profile.isTwoFactorEnabled ? (
-                          <button className="danger-button" onClick={handleDisable2Fa} disabled={loading}>Disable 2FA</button>
+                          <label className="toggle-switch" onClick={handleDisable2Fa}>
+                            <span className="toggle-label active">Enabled</span>
+                            <div className={`toggle-track ${!loading ? 'active' : ''}`} role="switch" aria-checked="true">
+                              <div className={`toggle-thumb ${!loading ? 'active' : ''}`} />
+                            </div>
+                          </label>
                         ) : (
-                          <button className="primary-button" onClick={handleGenerate2Fa} disabled={loading || twoFactorSetup}>Enable 2FA</button>
+                          <label className="toggle-switch" onClick={() => !twoFactorSetup && handleGenerate2Fa()}>
+                            <span className="toggle-label">Disabled</span>
+                            <div className="toggle-track" role="switch" aria-checked="false">
+                              <div className="toggle-thumb" />
+                            </div>
+                          </label>
                         )}
                       </div>
                       
@@ -567,7 +674,7 @@ function App() {
                               maxLength={6} 
                               required 
                               value={setupTwoFactorCode}
-                              onChange={e => setSetupTwoFactorCode(e.target.value)}
+                              onChange={e => setSetupTwoFactorCode(normalizeOtpCode(e.target.value))}
                               style={{ 
                                 padding: '0.6rem 0.75rem', 
                                 borderRadius: '6px', 
@@ -653,7 +760,16 @@ function App() {
                   <h2 className="card-title">All Users</h2>
                   <p className="card-subtitle">Manage registered accounts</p>
                 </div>
-                <button className="secondary-button" onClick={loadAdminUsers} disabled={dashLoading}>Refresh</button>
+                <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                  <input
+                    type="search"
+                    placeholder="Search by email…"
+                    value={adminUserQuery}
+                    onChange={e => setAdminUserQuery(e.target.value)}
+                    style={{ minWidth: "220px" }}
+                  />
+                  <button className="secondary-button" onClick={loadAdminUsers} disabled={dashLoading}>Refresh</button>
+                </div>
               </div>
               {dashLoading ? <div className="loading-pulse">Loading users...</div> : (
                 <div className="data-table-wrapper">
@@ -675,13 +791,27 @@ function App() {
                           <td>{u.email}</td>
                           <td><span className={`role-chip ${u.role === "ADMIN" ? "admin" : ""}`}>{u.role}</span></td>
                           <td>
-                            <span className={`status-badge ${u.verified ? "verified" : "unverified"}`}>
-                              <span className="status-dot" />{u.verified ? "Verified" : "Unverified"}
-                            </span>
+                            {u.locked ? (
+                              <span className={`status-badge locked`}>
+                                <span className="status-dot" />
+                                {u.lockType === "permanent" ? "Locked (permanent)" : u.lockType === "auto" ? "Locked (auto)" : "Locked"}
+                              </span>
+                            ) : (
+                              <span className={`status-badge ${u.verified ? "verified" : "unverified"}`}>
+                                <span className="status-dot" />{u.verified ? "Verified" : "Unverified"}
+                              </span>
+                            )}
                           </td>
                           <td>{formatDate(u.createdAt)}</td>
                           <td>
-                            <button className="secondary-button" onClick={() => unlockUser(u.id)}>Unlock</button>
+                            {u.locked ? (
+                              <button className="secondary-button" onClick={() => unlockUser(u.id)}>Unlock</button>
+                            ) : (
+                              <div style={{ display: "flex", gap: "0.4rem" }}>
+                                <button className="danger-button" onClick={() => lockUser(u.id, "temporary", 15)}>Lock (15m)</button>
+                                <button className="danger-button" style={{ background: "#7f1d1d", borderColor: "#991b1b" }} onClick={() => lockUser(u.id, "permanent")}>Lock (permanent)</button>
+                              </div>
+                            )}
                           </td>
                         </tr>
                       ))}
@@ -810,7 +940,9 @@ function App() {
       <main className="auth-shell">
         <section className="auth-card">
           <div className="brand-row">
-            <div className="brand-mark">AX</div>
+            <div className="brand-mark">
+              <span className="lock-icon" aria-hidden="true" />
+            </div>
             <div>
               <p className="eyebrow">AuthX</p>
               <h1>{title}</h1>
@@ -850,6 +982,11 @@ function App() {
                 {loading ? "Signing in..." : "Sign in"}
               </button>
               <button className="text-link" onClick={() => switchMode("forgot")} type="button">Forgot password?</button>
+              <div className="auth-divider"><span>or</span></div>
+              <button className="google-button" type="button" onClick={() => window.google?.accounts?.id?.prompt()}>
+                <svg viewBox="0 0 24 24" width="18" height="18"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
+                Continue with Google
+              </button>
             </form>
           ) : mode === "signup" ? (
             <form autoComplete="on" className="auth-form" onSubmit={handleSignup}>
@@ -868,6 +1005,11 @@ function App() {
               <p className="helper-text">8+ characters with uppercase, lowercase, number, and special character.</p>
               <button className="primary-button" disabled={loading} type="submit">
                 {loading ? "Creating account..." : "Sign up"}
+              </button>
+              <div className="auth-divider"><span>or</span></div>
+              <button className="google-button" type="button" onClick={() => window.google?.accounts?.id?.prompt()}>
+                <svg viewBox="0 0 24 24" width="18" height="18"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
+                Continue with Google
               </button>
             </form>
           ) : mode === "forgot" ? (
@@ -903,7 +1045,7 @@ function App() {
                 <input 
                   autoFocus 
                   name="code" 
-                  onChange={e => setTwoFactorCode(e.target.value)} 
+                  onChange={e => setTwoFactorCode(normalizeOtpCode(e.target.value))} 
                   placeholder="000000" 
                   required 
                   type="text" 
@@ -931,6 +1073,10 @@ function App() {
 }
 
 // ─── Utilities ───
+function getGoogleClientId() {
+  return import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
+}
+
 async function parseResponse(res) {
   const ct = res.headers.get("content-type") || "";
   return ct.includes("application/json") ? res.json() : res.text();
@@ -962,6 +1108,7 @@ function clearAuthQueryParams() {
   const url = new URL(window.location.href);
   url.searchParams.delete("verify");
   url.searchParams.delete("reset");
+  url.searchParams.delete("oauth");
   window.history.replaceState({}, "", url.pathname + url.search + url.hash);
 }
 
@@ -977,6 +1124,7 @@ function getApiBaseUrl() {
 
 function buildApiUrl(path) { return `${apiBaseUrl}${path}`; }
 function normalizeEmail(v) { return v.trim().toLowerCase(); }
+function normalizeOtpCode(v) { return (v || "").replace(/\D/g, "").slice(0, 6); }
 
 function formatDate(iso) {
   if (!iso) return "—";
@@ -989,11 +1137,27 @@ function formatDate(iso) {
 
 function parseDevice(ua) {
   if (!ua) return "Unknown device";
-  if (ua.includes("Chrome")) return "Chrome";
-  if (ua.includes("Firefox")) return "Firefox";
-  if (ua.includes("Safari")) return "Safari";
-  if (ua.includes("Edge")) return "Edge";
-  if (ua.includes("Opera") || ua.includes("OPR")) return "Opera";
+
+  const lower = ua.toLowerCase();
+
+  // Mobile platforms
+  if (lower.includes("android")) return "🤖 Android";
+  if (lower.includes("iphone") || lower.includes("ipad") || lower.includes("ios")) return "📱 iOS";
+
+  // Apple desktop / laptop
+  if (lower.includes("macintosh") || lower.includes("mac os")) return "💻 Mac";
+
+  // Windows / generic desktop
+  if (lower.includes("windows")) return "💻 Windows";
+  if (lower.includes("linux")) return "🖥️ Linux";
+
+  // Fallback to browser-based hint
+  if (ua.includes("Chrome")) return "🌐 Chrome";
+  if (ua.includes("Firefox")) return "🌐 Firefox";
+  if (ua.includes("Safari")) return "🌐 Safari";
+  if (ua.includes("Edge")) return "🌐 Edge";
+  if (ua.includes("Opera") || ua.includes("OPR")) return "🌐 Opera";
+
   return ua.length > 40 ? ua.substring(0, 40) + "…" : ua;
 }
 

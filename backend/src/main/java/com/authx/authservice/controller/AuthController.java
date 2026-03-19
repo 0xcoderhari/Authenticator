@@ -3,6 +3,7 @@ package com.authx.authservice.controller;
 import com.authx.authservice.dto.AuthResponse;
 import com.authx.authservice.dto.AuthSessionResult;
 import com.authx.authservice.dto.ForgotPasswordRequest;
+import com.authx.authservice.dto.GoogleLoginRequest;
 import com.authx.authservice.dto.LoginRequest;
 import com.authx.authservice.dto.ResendVerificationRequest;
 import com.authx.authservice.dto.ResetPasswordRequest;
@@ -98,6 +99,27 @@ public class AuthController {
         refreshTokenCookieService.writeAccessTokenCookie(servletResponse, result.getAccessToken());
         refreshTokenCookieService.writeRefreshTokenCookie(servletResponse, result.getRefreshToken());
         return ResponseEntity.ok(result.getResponse());
+    }
+
+    @PostMapping("/google")
+    public ResponseEntity<AuthResponse> googleLogin(
+            @Valid @RequestBody GoogleLoginRequest request,
+            HttpServletRequest servletRequest,
+            HttpServletResponse servletResponse
+    ) {
+        AuthSessionResult result = authService.googleLogin(
+                request.getIdToken(),
+                servletRequest.getHeader("User-Agent"),
+                extractClientIp(servletRequest)
+        );
+
+        if (result.getAccessToken() != null) {
+            refreshTokenCookieService.writeAccessTokenCookie(servletResponse, result.getAccessToken());
+            refreshTokenCookieService.writeRefreshTokenCookie(servletResponse, result.getRefreshToken());
+            return ResponseEntity.ok(result.getResponse());
+        }
+
+        return ResponseEntity.badRequest().body(result.getResponse());
     }
 
     @PostMapping("/logout")

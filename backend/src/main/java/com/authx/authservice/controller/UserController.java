@@ -17,6 +17,7 @@ import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
 import java.util.Map;
+import java.time.LocalDateTime;
 
 @RestController
 @RequestMapping("/api/user")
@@ -134,17 +135,39 @@ public class UserController {
     }
 
     @PostMapping("/2fa/disable")
-    public Map<String, String> disable2FA(Authentication authentication, HttpServletRequest request) {
+    public Map<String, String> disable2FA(
+            @RequestBody Map<String, String> requestData,
+            Authentication authentication,
+            HttpServletRequest request
+    ) {
+        String code = requestData.get("code");
+        if (code == null || code.isBlank()) {
+            throw new IllegalArgumentException("2FA code is required.");
+        }
+
         User user = getCurrentUser(authentication);
         if (!user.isTwoFactorEnabled()) {
             throw new IllegalArgumentException("2FA is not enabled.");
+        }
+
+        if (user.getTwoFactorSecret() == null) {
+            throw new IllegalArgumentException("2FA secret not available for this user.");
+        }
+
+        boolean isValid = twoFactorService.isOtpValid(user.getTwoFactorSecret(), code);
+        if (!isValid) {
+            auditService.log(user.getId(), user.getEmail(), AuditAction.TWO_FACTOR_FAILED,
+                    extractClientIp(request), request.getHeader("User-Agent"),
+                    "Invalid 2FA code when disabling 2FA");
+            throw new IllegalArgumentException("Invalid 2FA code.");
         }
 
         user.setTwoFactorEnabled(false);
         user.setTwoFactorSecret(null);
         userRepository.save(user);
 
-        auditService.log(user.getId(), user.getEmail(), AuditAction.TWO_FACTOR_DISABLED, extractClientIp(request), request.getHeader("User-Agent"));
+        auditService.log(user.getId(), user.getEmail(), AuditAction.TWO_FACTOR_DISABLED,
+                extractClientIp(request), request.getHeader("User-Agent"));
         return Map.of("message", "2-Factor Authentication disabled.");
     }
 
@@ -160,6 +183,7 @@ public class UserController {
                 .role(user.getRole().name())
                 .verified(user.isVerified())
                 .isTwoFactorEnabled(user.isTwoFactorEnabled())
+                .locked(user.getLockedUntil() != null && user.getLockedUntil().isAfter(LocalDateTime.now()))
                 .createdAt(user.getCreatedAt())
                 .build();
     }

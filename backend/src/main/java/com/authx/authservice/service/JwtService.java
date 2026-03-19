@@ -19,6 +19,7 @@ public class JwtService {
 
     private static final String TOKEN_TYPE_CLAIM = "type";
     private static final String ACCESS_TOKEN_TYPE = "access";
+    private static final String PRE_AUTH_TOKEN_TYPE = "pre_auth";
 
     private final SecretKey secretKey;
     private final long accessExpirationMinutes;
@@ -32,19 +33,11 @@ public class JwtService {
     }
 
     public String generateToken(User user, String sessionId) {
-        Instant now = Instant.now();
+        return generateToken(user, sessionId, ACCESS_TOKEN_TYPE);
+    }
 
-        return Jwts.builder()
-                .subject(user.getEmail())
-                .claim(TOKEN_TYPE_CLAIM, ACCESS_TOKEN_TYPE)
-                .claim("userId", user.getId())
-                .claim("email", user.getEmail())
-                .claim("role", user.getRole().name())
-                .claim("sessionId", sessionId)
-                .issuedAt(Date.from(now))
-                .expiration(Date.from(now.plus(accessExpirationMinutes, ChronoUnit.MINUTES)))
-                .signWith(secretKey)
-                .compact();
+    public String generatePreAuthToken(User user) {
+        return generateToken(user, "PRE_AUTH", PRE_AUTH_TOKEN_TYPE);
     }
 
     public String extractUsername(String token) {
@@ -56,17 +49,41 @@ public class JwtService {
     }
 
     public boolean validateToken(String token) {
-        try {
-            Claims claims = extractAllClaims(token);
-            return ACCESS_TOKEN_TYPE.equals(claims.get(TOKEN_TYPE_CLAIM, String.class))
-                    && claims.getExpiration().after(new Date());
-        } catch (Exception exception) {
-            return false;
-        }
+        return validateTokenType(token, ACCESS_TOKEN_TYPE);
+    }
+
+    public boolean validatePreAuthToken(String token) {
+        return validateTokenType(token, PRE_AUTH_TOKEN_TYPE);
     }
 
     public long getAccessTokenTtlSeconds() {
         return Duration.ofMinutes(accessExpirationMinutes).toSeconds();
+    }
+
+    private String generateToken(User user, String sessionId, String tokenType) {
+        Instant now = Instant.now();
+
+        return Jwts.builder()
+                .subject(user.getEmail())
+                .claim(TOKEN_TYPE_CLAIM, tokenType)
+                .claim("userId", user.getId())
+                .claim("email", user.getEmail())
+                .claim("role", user.getRole().name())
+                .claim("sessionId", sessionId)
+                .issuedAt(Date.from(now))
+                .expiration(Date.from(now.plus(accessExpirationMinutes, ChronoUnit.MINUTES)))
+                .signWith(secretKey)
+                .compact();
+    }
+
+    private boolean validateTokenType(String token, String expectedType) {
+        try {
+            Claims claims = extractAllClaims(token);
+            return expectedType.equals(claims.get(TOKEN_TYPE_CLAIM, String.class))
+                    && claims.getExpiration().after(new Date());
+        } catch (Exception exception) {
+            return false;
+        }
     }
 
     private Claims extractAllClaims(String token) {

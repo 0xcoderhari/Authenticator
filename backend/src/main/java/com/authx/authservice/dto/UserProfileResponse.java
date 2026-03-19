@@ -16,5 +16,7 @@ public class UserProfileResponse {
     private final String role;
     private final boolean verified;
     private final boolean isTwoFactorEnabled;
+    private final boolean locked;
+    private final String lockType; // "none", "temporary", "permanent", "auto"
     private final LocalDateTime createdAt;
 }

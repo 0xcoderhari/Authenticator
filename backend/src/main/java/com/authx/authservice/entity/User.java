@@ -44,6 +44,7 @@ public class User {
 
     private LocalDateTime lockedUntil;
 
+    @Builder.Default
     @Column(name = "is_two_factor_enabled", nullable = false)
     private boolean isTwoFactorEnabled = false;
 

@@ -11,6 +11,10 @@ import com.authx.authservice.entity.AuditAction;
 import com.authx.authservice.entity.Role;
 import com.authx.authservice.entity.User;
 import com.authx.authservice.repository.UserRepository;
+import com.google.api.client.googleapis.auth.oauth2.GoogleIdToken;
+import com.google.api.client.googleapis.auth.oauth2.GoogleIdTokenVerifier;
+import com.google.api.client.http.javanet.NetHttpTransport;
+import com.google.api.client.json.gson.GsonFactory;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
@@ -19,9 +23,16 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.time.Instant;
+import java.util.Collections;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.regex.Pattern;
+import java.util.HashMap;
+import java.util.Map;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 
 @Service
 @RequiredArgsConstructor
@@ -44,6 +55,9 @@ public class AuthService {
 
     @Value("${app.security.lockout-duration-minutes:15}")
     private long lockoutDurationMinutes;
+
+    @Value("${app.google.client-id:}")
+    private String googleClientId;
 
     @Transactional
     public String signup(SignupRequest request, String originHeader, String refererHeader,
@@ -86,6 +100,13 @@ public class AuthService {
         }
 
         User user = optionalUser.get();
+
+        // #region agent log
+        debugLog("H1", "AuthService.login", "Login attempt for existing user", Map.of(
+                "emailPresent", email != null && !email.isBlank(),
+                "twoFactorEnabled", user.isTwoFactorEnabled()
+        ));
+        // #endregion
 
         // Check account lockout
         if (user.getLockedUntil() != null && user.getLockedUntil().isAfter(LocalDateTime.now())) {
@@ -206,6 +227,107 @@ public class AuthService {
                 "Unlocked by admin");
     }
 
+    @Transactional
+    public void lockAccountTemporarily(User user, long durationMinutes, String adminIp, String adminAgent) {
+        user.setFailedLoginAttempts(maxFailedLogins);
+        user.setLockedUntil(LocalDateTime.now().plusMinutes(durationMinutes));
+        userRepository.save(user);
+        refreshTokenService.revokeAllSessions(user);
+        auditService.log(user.getId(), user.getEmail(), AuditAction.ACCOUNT_LOCKED, adminIp, adminAgent,
+                "Locked by admin for " + durationMinutes + " minutes");
+    }
+
+    @Transactional
+    public void lockAccountPermanently(User user, String adminIp, String adminAgent) {
+        user.setFailedLoginAttempts(maxFailedLogins);
+        user.setLockedUntil(LocalDateTime.of(9999, 12, 31, 0, 0));
+        userRepository.save(user);
+        refreshTokenService.revokeAllSessions(user);
+        auditService.log(user.getId(), user.getEmail(), AuditAction.ACCOUNT_LOCKED_PERMANENTLY, adminIp, adminAgent,
+                "Locked permanently by admin");
+    }
+
+    @Transactional
+    public AuthSessionResult googleLogin(String idToken, String userAgent, String ipAddress) {
+        try {
+            GoogleIdTokenVerifier verifier = new GoogleIdTokenVerifier.Builder(
+                    new NetHttpTransport(), GsonFactory.getDefaultInstance())
+                    .setAudience(Collections.singletonList(googleClientId))
+                    .build();
+
+            GoogleIdToken googleIdToken = verifier.verify(idToken);
+            if (googleIdToken == null) {
+                throw new IllegalArgumentException("Invalid Google ID token.");
+            }
+
+            GoogleIdToken.Payload payload = googleIdToken.getPayload();
+            String googleId = payload.getSubject();
+            String email = (String) payload.getEmail();
+            boolean emailVerified = payload.getEmailVerified();
+
+            // Check account lock
+            User user = userRepository.findByGoogleId(googleId)
+                    .orElseGet(() -> userRepository.findByEmail(email).orElse(null));
+
+            if (user != null && user.getLockedUntil() != null && user.getLockedUntil().isAfter(LocalDateTime.now())) {
+                Duration remaining = Duration.between(LocalDateTime.now(), user.getLockedUntil());
+                long minutes = remaining.toMinutes() + 1;
+                return new AuthSessionResult(new AuthResponse(
+                        "Account is locked. Try again in " + minutes + " minute(s).", null), null, null);
+            }
+
+            if (user != null) {
+                // Link existing account with Google if not linked
+                if (user.getGoogleId() == null) {
+                    user.setGoogleId(googleId);
+                }
+                if (!user.isVerified() && emailVerified) {
+                    user.setVerified(true);
+                }
+                user.setFailedLoginAttempts(0);
+                userRepository.save(user);
+            } else {
+                // Create new user
+                user = User.builder()
+                        .email(email)
+                        .googleId(googleId)
+                        .role(Role.USER)
+                        .isVerified(emailVerified)
+                        .createdAt(LocalDateTime.now())
+                        .build();
+                userRepository.save(user);
+            }
+
+            auditService.log(user.getId(), user.getEmail(), AuditAction.GOOGLE_LOGIN_SUCCESS, ipAddress, userAgent,
+                    "Google OAuth login");
+
+            return createSessionAndResponse(user, userAgent, ipAddress);
+        } catch (IllegalArgumentException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IllegalArgumentException("Google authentication failed. Please try again.");
+        }
+    }
+
+    private AuthSessionResult createSessionAndResponse(User user, String userAgent, String ipAddress) {
+        String accessToken = jwtService.generateToken(user, "GOOGLE_OAUTH");
+        RefreshTokenService.RefreshSessionIssue session = refreshTokenService.createSession(user, userAgent, ipAddress);
+
+        AuthResponse response = new AuthResponse(
+                "Google login successful",
+                null,
+                jwtService.getAccessTokenTtlSeconds(),
+                session.session().getSessionId(),
+                user.getId(),
+                user.getEmail(),
+                user.getRole().name(),
+                false,
+                null
+        );
+
+        return new AuthSessionResult(response, accessToken, session.refreshToken());
+    }
+
     private boolean isPasswordValid(User user, String rawPassword) {
         return user.getPassword() != null && passwordEncoder.matches(rawPassword, user.getPassword());
     }
@@ -219,12 +341,24 @@ public class AuthService {
     ) {
         if (!isPasswordValid(user, rawPassword)) {
             handleFailedLogin(user, ipAddress, userAgent);
+            // #region agent log
+            debugLog("H2", "AuthService.buildLoginResponse", "Invalid password during login", Map.of(
+                    "userId", user.getId(),
+                    "twoFactorEnabled", user.isTwoFactorEnabled()
+            ));
+            // #endregion
             return new AuthSessionResult(new AuthResponse("Invalid email or password", null), null, null);
         }
 
         if (!user.isVerified()) {
             auditService.log(user.getId(), user.getEmail(), AuditAction.LOGIN_FAILURE, ipAddress, userAgent,
                     "Email not verified");
+            // #region agent log
+            debugLog("H3", "AuthService.buildLoginResponse", "Email not verified during login", Map.of(
+                    "userId", user.getId(),
+                    "twoFactorEnabled", user.isTwoFactorEnabled()
+            ));
+            // #endregion
             return new AuthSessionResult(new AuthResponse("Verify your email before signing in.", null), null, null);
         }
 
@@ -237,7 +371,12 @@ public class AuthService {
 
         if (user.isTwoFactorEnabled()) {
             auditService.log(user.getId(), user.getEmail(), AuditAction.LOGIN_SUCCESS, ipAddress, userAgent, "2FA Required");
-            String preAuthToken = jwtService.generateToken(user, "PRE_AUTH");
+            String preAuthToken = jwtService.generatePreAuthToken(user);
+            // #region agent log
+            debugLog("H4", "AuthService.buildLoginResponse", "2FA required branch taken", Map.of(
+                    "userId", user.getId()
+            ));
+            // #endregion
             return new AuthSessionResult(
                     new AuthResponse("2-Factor Authentication required.", null, null, null, null, null, null, true, preAuthToken),
                     null,
@@ -252,6 +391,12 @@ public class AuthService {
         );
 
         auditService.log(user.getId(), user.getEmail(), AuditAction.LOGIN_SUCCESS, ipAddress, userAgent);
+        // #region agent log
+        debugLog("H5", "AuthService.buildLoginResponse", "Password-only login successful", Map.of(
+                "userId", user.getId(),
+                "twoFactorEnabled", user.isTwoFactorEnabled()
+        ));
+        // #endregion
         return buildAuthSessionResult(
                 user,
                 refreshSession.session().getSessionId(),
@@ -262,16 +407,33 @@ public class AuthService {
 
     @Transactional
     public AuthSessionResult verify2fa(String preAuthToken, String code, String ipAddress, String userAgent) {
+        if (!jwtService.validatePreAuthToken(preAuthToken)) {
+            auditService.log(null, null, AuditAction.LOGIN_FAILURE, ipAddress, userAgent, "Invalid pre-auth token");
+            // #region agent log
+            debugLog("H6", "AuthService.verify2fa", "Invalid pre-auth token when verifying 2FA", Map.of(
+                    "hasToken", preAuthToken != null && !preAuthToken.isBlank()
+            ));
+            // #endregion
+            throw new IllegalArgumentException("Invalid or expired authentication token. Please log in again.");
+        }
+
         String email;
         try {
             email = jwtService.extractUsername(preAuthToken);
         } catch (Exception e) {
-            auditService.log(null, null, AuditAction.LOGIN_FAILURE, ipAddress, userAgent, "Invalid pre-auth token");
-            throw new IllegalArgumentException("Invalid authentication token. Please log in again.");
+            auditService.log(null, null, AuditAction.LOGIN_FAILURE, ipAddress, userAgent, "Unreadable pre-auth token");
+            throw new IllegalArgumentException("Invalid or expired authentication token. Please log in again.");
         }
 
         User user = userRepository.findByEmail(email)
                 .orElseThrow(() -> new IllegalArgumentException("User not found"));
+
+        // #region agent log
+        debugLog("H7", "AuthService.verify2fa", "2FA verification started for user", Map.of(
+                "userId", user.getId(),
+                "twoFactorEnabled", user.isTwoFactorEnabled()
+        ));
+        // #endregion
 
         if (!user.isTwoFactorEnabled()) {
             throw new IllegalArgumentException("2FA is not enabled for this user.");
@@ -281,6 +443,11 @@ public class AuthService {
         if (!isValid) {
             auditService.log(user.getId(), email, AuditAction.TWO_FACTOR_FAILED, ipAddress, userAgent, "Invalid 2FA code during login");
             handleFailedLogin(user, ipAddress, userAgent);
+            // #region agent log
+            debugLog("H8", "AuthService.verify2fa", "Invalid 2FA code during login", Map.of(
+                    "userId", user.getId()
+            ));
+            // #endregion
             throw new IllegalArgumentException("Invalid 2-Factor Authentication code.");
         }
 
@@ -291,6 +458,11 @@ public class AuthService {
         );
 
         auditService.log(user.getId(), email, AuditAction.LOGIN_SUCCESS, ipAddress, userAgent, "2FA Verified");
+        // #region agent log
+        debugLog("H9", "AuthService.verify2fa", "2FA verification successful", Map.of(
+                "userId", user.getId()
+        ));
+        // #endregion
         return buildAuthSessionResult(
                 user,
                 refreshSession.session().getSessionId(),
@@ -335,6 +507,39 @@ public class AuthService {
 
         return new AuthSessionResult(response, accessToken, refreshToken);
     }
+
+    // #region agent log
+    private void debugLog(String hypothesisId, String location, String message, Map<String, Object> data) {
+        try {
+            Map<String, Object> payload = new HashMap<>();
+            payload.put("sessionId", "c345b9");
+            payload.put("id", "log_" + Instant.now().toEpochMilli());
+            payload.put("timestamp", Instant.now().toEpochMilli());
+            payload.put("location", location);
+            payload.put("message", message);
+            payload.put("hypothesisId", hypothesisId);
+            payload.put("runId", "pre-fix");
+            payload.put("data", data);
+
+            StringBuilder json = new StringBuilder();
+            json.append("{");
+            json.append("\"sessionId\":\"").append("c345b9").append("\",");
+            json.append("\"id\":\"").append(payload.get("id")).append("\",");
+            json.append("\"timestamp\":").append(payload.get("timestamp")).append(",");
+            json.append("\"location\":\"").append(location).append("\",");
+            json.append("\"message\":\"").append(message.replace("\"", "\\\"")).append("\",");
+            json.append("\"hypothesisId\":\"").append(hypothesisId).append("\",");
+            json.append("\"runId\":\"pre-fix\",");
+            json.append("\"data\":").append(data != null ? data.toString().replace("=", "\":\"").replace("{", "{\"").replace("}", "\"}") : "{}");
+            json.append("}\n");
+
+            Path path = Path.of("debug-c345b9.log");
+            Files.writeString(path, json.toString(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+        } catch (Exception ignored) {
+            // Swallow any logging errors to avoid impacting auth flow
+        }
+    }
+    // #endregion
 
     private void validatePassword(String password, String confirmPassword) {
         if (password == null || confirmPassword == null) {
