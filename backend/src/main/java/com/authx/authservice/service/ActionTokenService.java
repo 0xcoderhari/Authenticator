@@ -24,6 +24,9 @@ public class ActionTokenService {
     @Value("${app.security.password-reset-minutes:15}")
     private long passwordResetMinutes;
 
+    @Value("${app.security.magic-link-minutes:15}")
+    private long magicLinkMinutes;
+
     @Transactional
     public String createEmailVerificationToken(User user) {
         return createToken(user, ActionTokenPurpose.EMAIL_VERIFICATION, emailVerificationMinutes);
@@ -32,6 +35,11 @@ public class ActionTokenService {
     @Transactional
     public String createPasswordResetToken(User user) {
         return createToken(user, ActionTokenPurpose.PASSWORD_RESET, passwordResetMinutes);
+    }
+
+    @Transactional
+    public String createMagicLinkToken(User user) {
+        return createToken(user, ActionTokenPurpose.MAGIC_LINK, magicLinkMinutes);
     }
 
     @Transactional
@@ -49,6 +57,15 @@ public class ActionTokenService {
                 rawToken,
                 ActionTokenPurpose.PASSWORD_RESET,
                 "The password reset link is invalid, expired, or already used."
+        );
+    }
+
+    @Transactional
+    public User consumeMagicLinkToken(String rawToken) {
+        return consumeToken(
+                rawToken,
+                ActionTokenPurpose.MAGIC_LINK,
+                "The magic link is invalid, expired, or already used."
         );
     }
 

@@ -4,6 +4,7 @@ import com.authx.authservice.dto.AuthResponse;
 import com.authx.authservice.dto.AuthSessionResult;
 import com.authx.authservice.dto.ForgotPasswordRequest;
 import com.authx.authservice.dto.LoginRequest;
+import com.authx.authservice.dto.MagicLinkRequest;
 import com.authx.authservice.dto.ResendVerificationRequest;
 import com.authx.authservice.dto.ResetPasswordRequest;
 import com.authx.authservice.dto.SignupRequest;
@@ -49,6 +50,7 @@ public class AuthService {
     private final ActionTokenService actionTokenService;
     private final AuditService auditService;
     private final TwoFactorService twoFactorService;
+    private final LoginAlertService loginAlertService;
 
     @Value("${app.security.max-failed-logins:5}")
     private int maxFailedLogins;
@@ -189,6 +191,57 @@ public class AuthService {
         return "If that email exists, a password reset link has been sent.";
     }
 
+    public String requestMagicLink(MagicLinkRequest request, String originHeader,
+                                 String refererHeader, String ipAddress, String userAgent) {
+        String email = normalizeEmail(request.getEmail());
+        Optional<User> user = userRepository.findByEmail(email);
+        user.ifPresent(existingUser -> mailService.sendMagicLinkEmail(
+                existingUser.getEmail(),
+                actionTokenService.createMagicLinkToken(existingUser),
+                originHeader,
+                refererHeader
+        ));
+
+        return "If that email exists, a magic link has been sent.";
+    }
+
+    @Transactional
+    public AuthSessionResult verifyMagicLink(String token, String ipAddress, String userAgent) {
+        User user = actionTokenService.consumeMagicLinkToken(token);
+        
+        // Reset lockout on successful login
+        if (user.getFailedLoginAttempts() > 0 || user.getLockedUntil() != null) {
+            user.setFailedLoginAttempts(0);
+            user.setLockedUntil(null);
+            userRepository.save(user);
+        }
+
+        if (user.isTwoFactorEnabled()) {
+            auditService.log(user.getId(), user.getEmail(), AuditAction.LOGIN_SUCCESS, ipAddress, userAgent, "2FA Required (Magic Link)");
+            String preAuthToken = jwtService.generatePreAuthToken(user);
+            return new AuthSessionResult(
+                    new AuthResponse("2-Factor Authentication required.", null, null, null, null, null, null, true, preAuthToken),
+                    null,
+                    null
+            );
+        }
+
+        RefreshTokenService.RefreshSessionIssue refreshSession = refreshTokenService.createSession(
+                user,
+                userAgent,
+                ipAddress
+        );
+
+        auditService.log(user.getId(), user.getEmail(), AuditAction.LOGIN_SUCCESS, ipAddress, userAgent, "Magic Link Login");
+        loginAlertService.checkAnomalousLogin(user, ipAddress, userAgent);
+        return buildAuthSessionResult(
+                user,
+                refreshSession.session().getSessionId(),
+                refreshSession.refreshToken(),
+                "Login successful"
+        );
+    }
+
     @Transactional
     public String verifyEmail(String token, String ipAddress, String userAgent) {
         User user = actionTokenService.consumeEmailVerificationToken(token);
@@ -300,6 +353,7 @@ public class AuthService {
 
             auditService.log(user.getId(), user.getEmail(), AuditAction.GOOGLE_LOGIN_SUCCESS, ipAddress, userAgent,
                     "Google OAuth login");
+            loginAlertService.checkAnomalousLogin(user, ipAddress, userAgent);
 
             return createSessionAndResponse(user, userAgent, ipAddress);
         } catch (IllegalArgumentException e) {
@@ -391,6 +445,7 @@ public class AuthService {
         );
 
         auditService.log(user.getId(), user.getEmail(), AuditAction.LOGIN_SUCCESS, ipAddress, userAgent);
+        loginAlertService.checkAnomalousLogin(user, ipAddress, userAgent);
         // #region agent log
         debugLog("H5", "AuthService.buildLoginResponse", "Password-only login successful", Map.of(
                 "userId", user.getId(),
@@ -458,6 +513,7 @@ public class AuthService {
         );
 
         auditService.log(user.getId(), email, AuditAction.LOGIN_SUCCESS, ipAddress, userAgent, "2FA Verified");
+        loginAlertService.checkAnomalousLogin(user, ipAddress, userAgent);
         // #region agent log
         debugLog("H9", "AuthService.verify2fa", "2FA verification successful", Map.of(
                 "userId", user.getId()

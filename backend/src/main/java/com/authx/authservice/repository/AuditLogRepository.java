@@ -1,10 +1,13 @@
 package com.authx.authservice.repository;
 
+import com.authx.authservice.entity.AuditAction;
 import com.authx.authservice.entity.AuditLog;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.stereotype.Repository;
+
+import java.util.List;
 
 @Repository
 public interface AuditLogRepository extends JpaRepository<AuditLog, Long> {
@@ -12,4 +15,6 @@ public interface AuditLogRepository extends JpaRepository<AuditLog, Long> {
     Page<AuditLog> findAllByOrderByCreatedAtDesc(Pageable pageable);
 
     Page<AuditLog> findByUserIdOrderByCreatedAtDesc(Long userId, Pageable pageable);
+
+    List<AuditLog> findTop10ByEmailAndActionOrderByCreatedAtDesc(String email, AuditAction action);
 }

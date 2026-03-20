@@ -17,6 +17,8 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
 
 @Service
 @RequiredArgsConstructor
@@ -41,6 +43,9 @@ public class MailService {
 
     @Value("${app.security.password-reset-minutes:15}")
     private long passwordResetMinutes;
+
+    @Value("${app.security.magic-link-minutes:15}")
+    private long magicLinkMinutes;
 
     @PostConstruct
     void normalizeMailCredentials() {
@@ -115,6 +120,38 @@ public class MailService {
                   <p>If you did not request a password reset, you can ignore this email.</p>
                 </div>
                 """.formatted(resetLink, passwordResetExpiryText);
+
+        sendEmail(email, subject, textBody, htmlBody);
+    }
+
+    public void sendMagicLinkEmail(String email, String token, String originHeader, String refererHeader) {
+        String magicLink = buildLink("magic", token, originHeader, refererHeader);
+        String magicLinkExpiryText = formatDuration(magicLinkMinutes);
+        String subject = "Sign in to AuthX";
+        String textBody = """
+                Welcome back to AuthX.
+
+                Open the link below to securely sign in to your account:
+                %s
+
+                This link expires in %s and can only be used once.
+
+                If you did not request this link, you can safely ignore this email.
+                """.formatted(magicLink, magicLinkExpiryText);
+        String htmlBody = """
+                <div style="font-family: Arial, sans-serif; color: #162033; line-height: 1.6;">
+                  <h2 style="margin: 0 0 16px;">Sign in to AuthX</h2>
+                  <p>Welcome back to AuthX.</p>
+                  <p>Click the button below to securely sign in to your account:</p>
+                  <p style="margin: 24px 0;">
+                    <a href="%1$s" style="background: #1158ff; color: #ffffff; text-decoration: none; padding: 12px 18px; border-radius: 10px; display: inline-block; font-weight: 700;">Sign in to AuthX</a>
+                  </p>
+                  <p>If the button does not work, open this link:</p>
+                  <p><a href="%1$s">%1$s</a></p>
+                  <p>This link expires in %2$s and can only be used once.</p>
+                  <p>If you did not request this link, you can safely ignore this email.</p>
+                </div>
+                """.formatted(magicLink, magicLinkExpiryText);
 
         sendEmail(email, subject, textBody, htmlBody);
     }
@@ -217,5 +254,56 @@ public class MailService {
                 + (hours == 1 ? " hour " : " hours ")
                 + remainingMinutes
                 + (remainingMinutes == 1 ? " minute" : " minutes");
+    }
+
+    public void sendNewDeviceAlert(String to, String location, String device, LocalDateTime time) {
+        String subject = "New Login Alert - AuthX";
+        String timeStr = time.toString();
+        
+        String htmlBody = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <style>
+                    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; background-color: #f9fbfd; }
+                    .container { max-width: 600px; margin: 40px auto; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+                    .header { background-color: #f43f5e; padding: 30px; text-align: center; }
+                    .header h1 { color: white; margin: 0; font-size: 24px; font-weight: 600; }
+                    .content { padding: 40px; }
+                    .alert-box { background-color: #fff1f2; border: 1px solid #fda4af; border-left: 4px solid #e11d48; padding: 15px 20px; border-radius: 6px; margin: 20px 0; }
+                    .footer { text-align: center; padding: 20px; font-size: 13px; color: #64748b; background-color: #f8fafc; border-top: 1px solid #e2e8f0; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="header">
+                        <h1>Security Alert</h1>
+                    </div>
+                    <div class="content">
+                        <h2>New Login Detected</h2>
+                        <p>We noticed a new login to your AuthX account from an unfamiliar device or location.</p>
+                        
+                        <div class="alert-box">
+                            <ul style="list-style: none; padding: 0; margin: 0; font-size: 15px;">
+                                <li style="margin-bottom: 8px;"><strong>Device:</strong> %s</li>
+                                <li style="margin-bottom: 8px;"><strong>Location:</strong> %s</li>
+                                <li><strong>Time:</strong> %s</li>
+                            </ul>
+                        </div>
+                        
+                        <p>If this was you, you can safely ignore this email.</p>
+                        <p style="font-weight: 500; color: #e11d48;">If you don't recognize this activity, please sign in and change your password immediately.</p>
+                    </div>
+                    <div class="footer">
+                        &copy; %d AuthX. This is an automated security alert.
+                    </div>
+                </div>
+            </body>
+            </html>
+            """.formatted(device, location, timeStr, LocalDate.now().getYear());
+
+        String textBody = String.format("New Login Alert - AuthX\n\nWe noticed a new login from an unfamiliar device/location.\nDevice: %s\nLocation: %s\nTime: %s\n\nIf you don't recognize this, change your password immediately.", device, location, timeStr);
+
+        sendEmail(to, subject, textBody, htmlBody);
     }
 }

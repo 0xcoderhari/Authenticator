@@ -20,6 +20,7 @@ function App() {
   const [resetForm, setResetForm] = useState(initialReset);
   const [verificationToken, setVerificationToken] = useState(() => getQueryToken("verify"));
   const [resetToken, setResetToken] = useState(() => getQueryToken("reset"));
+  const [magicToken, setMagicToken] = useState(() => getQueryToken("magic"));
   const [currentUser, setCurrentUser] = useState(null);
   const [accountEmail, setAccountEmail] = useState(
     () => localStorage.getItem("auth_email") || "",
@@ -57,33 +58,36 @@ function App() {
 
   useEffect(() => { void restoreSession(); }, []);
 
-  // Initialize Google Identity Services
+  // Handle OAuth 2.0 redirect flow callback (id_token in URL hash)
   useEffect(() => {
-    const clientId = getGoogleClientId();
-    if (!clientId) return;
-
-    const script = document.createElement("script");
-    script.src = "https://accounts.google.com/gsi/client";
-    script.async = true;
-    script.defer = true;
-    script.onload = () => {
-      window.google.accounts.id.initialize({
-        client_id: clientId,
-        callback: (response) => {
-          if (response.credential) {
-            void handleGoogleLogin(response.credential);
-          }
-        },
-        auto_select: false,
-        cancel_on_tap_outside: true,
-      });
-    };
-    document.head.appendChild(script);
+    const hash = window.location.hash;
+    if (hash && hash.includes("id_token=")) {
+      const params = new URLSearchParams(hash.substring(1));
+      const idToken = params.get("id_token");
+      if (idToken) {
+        // Clear the hash from the URL
+        window.history.replaceState(null, null, window.location.pathname + window.location.search);
+        void handleGoogleLogin(idToken);
+      }
+    }
   }, []);
+
+  function initiateGoogleLogin() {
+    const clientId = getGoogleClientId();
+    if (!clientId) {
+      setError("Google Client ID not configured.");
+      return;
+    }
+    const redirectUri = window.location.origin;
+    const nonce = Math.random().toString(36).substring(2) + Date.now().toString(36);
+    const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=id_token&scope=openid%20email%20profile&nonce=${nonce}`;
+    window.location.href = authUrl;
+  }
 
   useEffect(() => {
     if (mode === "verify" && verificationToken) void handleVerifyEmail();
-  }, [mode, verificationToken]);
+    if (mode === "magic-verify" && magicToken) void handleVerifyMagicLink();
+  }, [mode, verificationToken, magicToken]);
 
   useEffect(() => {
     if (accountEmail) localStorage.setItem("auth_email", accountEmail);
@@ -303,6 +307,59 @@ function App() {
     } catch (err) { setError(err.message); } finally { setLoading(false); }
   }
 
+  async function handleVerifyMagicLink() {
+    if (!magicToken) { setError("Invalid magic link."); return; }
+    setLoading(true); setError(""); setAuthMessage("");
+    try {
+      const res = await fetch(
+        buildApiUrl("/api/auth/magic-link/verify"),
+        { 
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ token: magicToken })
+        }
+      );
+      const data = await parseResponse(res);
+      if (!res.ok) throw new Error(extractErrorMessage(data));
+      
+      setMagicToken("");
+      
+      if (data.requires2fa) {
+        setPreAuthToken(data.preAuthToken);
+        setMode("verify-2fa");
+        setAuthMessage("Please enter your 2-Factor Authentication code.");
+      } else {
+        applyAuthenticatedUser(data);
+        setAuthMessage(data.message || "Signed in securely.");
+      }
+    } catch (err) { 
+      setError(err.message); 
+      setMode("login"); 
+    } finally { setLoading(false); }
+  }
+
+  async function handleRequestMagicLink() {
+    if (!loginForm.email) {
+      setError("Please enter your email address first.");
+      document.querySelector('input[name="email"]')?.focus();
+      return;
+    }
+    setLoading(true); setError(""); setAuthMessage("");
+    try {
+      const email = normalizeEmail(loginForm.email);
+      const res = await fetch(buildApiUrl("/api/auth/magic-link"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      const data = await parseResponse(res);
+      if (!res.ok) throw new Error(extractErrorMessage(data));
+      setAuthMessage(typeof data === "string" ? data : "Magic link sent. Check your email.");
+      setMode("magic-sent");
+    } catch (err) { setError(err.message); } finally { setLoading(false); }
+  }
+
   async function handleResendVerification() {
     setLoading(true); setError(""); setAuthMessage("");
     try {
@@ -363,7 +420,7 @@ function App() {
         // Backend says 2FA is already enabled — force UI into "enabled" state
         setTwoFactorSetup(null);
         setSetupTwoFactorCode("");
-        setProfile(prev => prev ? { ...prev, isTwoFactorEnabled: true } : prev);
+        setProfile(prev => prev ? { ...prev, twoFactorEnabled: true } : prev);
         setAuthMessage("2FA is already enabled on your account.");
         setError("");
       } else {
@@ -638,10 +695,10 @@ function App() {
                         <div>
                           <span className="profile-label">Two-Factor Authentication (2FA)</span>
                           <p className="profile-value" style={{ marginTop: '0.25rem', fontSize: '0.9rem', color: 'var(--text-muted)' }}>
-                            {profile.isTwoFactorEnabled ? 'Enabled. Your account is secured with 2FA.' : 'Add an extra layer of security to your account.'}
+                            {profile.twoFactorEnabled ? 'Enabled. Your account is secured with 2FA.' : 'Add an extra layer of security to your account.'}
                           </p>
                         </div>
-                        {profile.isTwoFactorEnabled ? (
+                        {profile.twoFactorEnabled ? (
                           <label className="toggle-switch" onClick={handleDisable2Fa}>
                             <span className="toggle-label active">Enabled</span>
                             <div className={`toggle-track ${!loading ? 'active' : ''}`} role="switch" aria-checked="true">
@@ -658,7 +715,7 @@ function App() {
                         )}
                       </div>
                       
-                      {twoFactorSetup && !profile.isTwoFactorEnabled && (
+                      {twoFactorSetup && !profile.twoFactorEnabled && (
                         <div className="animate-in" style={{ marginTop: '1rem', padding: '1.5rem', background: 'var(--bg-elevated)', borderRadius: '8px', border: '1px solid var(--border)', width: '100%' }}>
                           <p style={{ marginBottom: '1rem', fontWeight: 500 }}>1. Scan this QR code with your authenticator app (e.g., Google Authenticator, Authy):</p>
                           <div style={{ background: '#fff', padding: '0.5rem', display: 'inline-block', borderRadius: '4px', marginBottom: '1rem' }}>
@@ -922,6 +979,8 @@ function App() {
     : mode === "forgot" ? "Forgot password"
     : mode === "reset" ? "Reset password"
     : mode === "verify" ? "Verify email"
+    : mode === "magic-verify" ? "Secure Sign In"
+    : mode === "magic-sent" ? "Check your email"
     : mode === "verify-2fa" ? "Two-Factor Authentication"
     : "Sign in";
 
@@ -930,6 +989,8 @@ function App() {
     : mode === "forgot" ? "Enter your email to receive a reset link."
     : mode === "reset" ? "Choose a new password for your account."
     : mode === "verify" ? "Finishing your email verification."
+    : mode === "magic-verify" ? "Securely signing you in."
+    : mode === "magic-sent" ? "We've sent a magic link to your email."
     : mode === "verify-2fa" ? "Enter the 6-digit code from your authenticator app."
     : "Use your email and password to continue.";
 
@@ -950,7 +1011,7 @@ function App() {
             </div>
           </div>
 
-          {mode !== "forgot" && mode !== "reset" && mode !== "verify" && mode !== "verify-2fa" && (
+          {mode !== "forgot" && mode !== "reset" && mode !== "verify" && mode !== "verify-2fa" && mode !== "magic-sent" && mode !== "magic-verify" && (
             <div className="tab-row">
               <button className={mode === "login" ? "tab active" : "tab"} onClick={() => switchMode("login")} type="button">Sign in</button>
               <button className={mode === "signup" ? "tab active" : "tab"} onClick={() => switchMode("signup")} type="button">Sign up</button>
@@ -978,12 +1039,17 @@ function App() {
                 <span>Password</span>
                 <input autoComplete="current-password" name="password" onChange={e => setLoginForm(c => ({ ...c, password: e.target.value }))} placeholder="Enter your password" required type="password" value={loginForm.password} />
               </label>
-              <button className="primary-button" disabled={loading || restoringSession} type="submit">
-                {loading ? "Signing in..." : "Sign in"}
-              </button>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '1rem' }}>
+                <button className="primary-button" disabled={loading || restoringSession} type="submit">
+                  {loading ? "Signing in..." : "Sign in with password"}
+                </button>
+                <button className="secondary-button" disabled={loading || restoringSession} type="button" onClick={handleRequestMagicLink}>
+                  {loading ? "Sending..." : "Email me a magic link"}
+                </button>
+              </div>
               <button className="text-link" onClick={() => switchMode("forgot")} type="button">Forgot password?</button>
               <div className="auth-divider"><span>or</span></div>
-              <button className="google-button" type="button" onClick={() => window.google?.accounts?.id?.prompt()}>
+              <button className="google-button" type="button" onClick={initiateGoogleLogin}>
                 <svg viewBox="0 0 24 24" width="18" height="18"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
                 Continue with Google
               </button>
@@ -1007,7 +1073,7 @@ function App() {
                 {loading ? "Creating account..." : "Sign up"}
               </button>
               <div className="auth-divider"><span>or</span></div>
-              <button className="google-button" type="button" onClick={() => window.google?.accounts?.id?.prompt()}>
+              <button className="google-button" type="button" onClick={initiateGoogleLogin}>
                 <svg viewBox="0 0 24 24" width="18" height="18"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
                 Continue with Google
               </button>
@@ -1060,6 +1126,26 @@ function App() {
               </button>
               <button className="text-link" onClick={() => switchMode("login")} type="button">Back to sign in</button>
             </form>
+          ) : mode === "magic-sent" ? (
+            <div className="auth-form">
+              <div style={{ textAlign: "center", padding: "1rem 0" }}>
+                <span style={{ fontSize: "2.5rem", display: "block", marginBottom: "1rem" }}>✉️</span>
+                <p style={{ margin: 0, fontSize: "1.05rem", color: "var(--text-main)", fontWeight: 500 }}>
+                  We sent a secure sign-in link to <strong>{loginForm.email}</strong>.
+                </p>
+                <p className="helper-text" style={{ marginTop: "0.5rem" }}>
+                  Please check your inbox and click the link to continue.
+                </p>
+              </div>
+              <button className="secondary-button" onClick={() => switchMode("login")} type="button">Back to sign in</button>
+            </div>
+          ) : mode === "magic-verify" ? (
+            <div className="auth-form">
+              <p className="helper-text" style={{ textAlign: "center", fontSize: "1.1rem" }}>
+                {loading ? "Verifying magic link..." : "Signing you in..."}
+              </p>
+              {!loading && <button className="secondary-button" onClick={() => switchMode("login")} type="button">Back to sign in</button>}
+            </div>
           ) : (
             <div className="auth-form">
               <p className="helper-text">{loading ? "Verifying your email..." : "Use the link in your email to verify."}</p>
@@ -1095,6 +1181,7 @@ function extractErrorMessage(data) {
 function getInitialMode() {
   if (getQueryToken("reset")) return "reset";
   if (getQueryToken("verify")) return "verify";
+  if (getQueryToken("magic")) return "magic-verify";
   return "login";
 }
 
@@ -1108,6 +1195,7 @@ function clearAuthQueryParams() {
   const url = new URL(window.location.href);
   url.searchParams.delete("verify");
   url.searchParams.delete("reset");
+  url.searchParams.delete("magic");
   url.searchParams.delete("oauth");
   window.history.replaceState({}, "", url.pathname + url.search + url.hash);
 }

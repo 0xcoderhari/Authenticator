@@ -137,6 +137,40 @@ public class AuthController {
         return ResponseEntity.ok(Map.of("message", "Logged out successfully."));
     }
 
+    @PostMapping("/magic-link")
+    public ResponseEntity<String> requestMagicLink(
+            @Valid @RequestBody com.authx.authservice.dto.MagicLinkRequest request,
+            @RequestHeader(value = "Origin", required = false) String originHeader,
+            @RequestHeader(value = "Referer", required = false) String refererHeader,
+            HttpServletRequest servletRequest
+    ) {
+        return ResponseEntity.ok(authService.requestMagicLink(request, originHeader, refererHeader,
+                extractClientIp(servletRequest), servletRequest.getHeader("User-Agent")));
+    }
+
+    @PostMapping("/magic-link/verify")
+    public ResponseEntity<AuthResponse> verifyMagicLink(
+            @Valid @RequestBody com.authx.authservice.dto.VerifyMagicLinkRequest request,
+            HttpServletRequest servletRequest,
+            HttpServletResponse servletResponse
+    ) {
+        AuthSessionResult result = authService.verifyMagicLink(
+                request.getToken(),
+                extractClientIp(servletRequest),
+                servletRequest.getHeader("User-Agent")
+        );
+
+        if (result.getAccessToken() != null) {
+            refreshTokenCookieService.writeAccessTokenCookie(servletResponse, result.getAccessToken());
+            refreshTokenCookieService.writeRefreshTokenCookie(servletResponse, result.getRefreshToken());
+            return ResponseEntity.ok(result.getResponse());
+        } else if (result.getResponse().isRequires2fa()) {
+            return ResponseEntity.ok(result.getResponse());
+        }
+
+        return ResponseEntity.badRequest().body(result.getResponse());
+    }
+
     @PostMapping("/forgot-password")
     public ResponseEntity<String> forgotPassword(
             @Valid @RequestBody ForgotPasswordRequest request,
