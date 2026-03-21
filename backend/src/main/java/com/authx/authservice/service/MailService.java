@@ -25,6 +25,7 @@ import java.time.LocalDateTime;
 public class MailService {
 
     private final JavaMailSender mailSender;
+    private final org.springframework.data.redis.core.RedisTemplate<String, Object> redisTemplate;
 
     @Value("${app.mail.from:${spring.mail.username:}}")
     private String fromAddress;
@@ -157,6 +158,11 @@ public class MailService {
     }
 
     private void sendEmail(String to, String subject, String textBody, String htmlBody) {
+        com.authx.authservice.dto.EmailTask task = new com.authx.authservice.dto.EmailTask(to, subject, textBody, htmlBody);
+        redisTemplate.opsForList().leftPush("email:queue", task);
+    }
+
+    public void executeSendEmail(String to, String subject, String textBody, String htmlBody) {
         if (fromAddress == null || fromAddress.isBlank()) {
             throw new EmailDeliveryException(
                     "Email delivery is not configured. Set MAIL_USERNAME, MAIL_PASSWORD, and optionally MAIL_FROM."

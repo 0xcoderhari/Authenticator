@@ -1,35 +1,32 @@
 package com.authx.authservice.service;
 
-import com.authx.authservice.entity.AuditAction;
-import com.authx.authservice.entity.AuditLog;
 import com.authx.authservice.entity.User;
-import com.authx.authservice.repository.AuditLogRepository;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
 import java.time.LocalDateTime;
-import java.util.List;
 import java.util.Map;
 
 @Service
 public class LoginAlertService {
 
-    private final AuditLogRepository auditLogRepository;
     private final MailService mailService;
     private final RestTemplate restTemplate;
+    private final RedisTemplate<String, Object> redisTemplate;
 
     @Autowired
-    public LoginAlertService(AuditLogRepository auditLogRepository, MailService mailService) {
-        this.auditLogRepository = auditLogRepository;
+    public LoginAlertService(MailService mailService, RedisTemplate<String, Object> redisTemplate) {
         this.mailService = mailService;
+        this.redisTemplate = redisTemplate;
         this.restTemplate = new RestTemplate();
     }
 
     /**
      * Checks if this login is anomalous asynchronously.
-     * If anomalous, sends an alert email.
+     * Uses Redis Sets for O(1) detection instead of MySQL.
      */
     @Async
     public void checkAnomalousLogin(User user, String ipAddress, String userAgent) {
@@ -37,27 +34,14 @@ public class LoginAlertService {
             return;
         }
 
-        // Get recent successful logins for this user
-        List<AuditLog> previousLogins = auditLogRepository.findTop10ByEmailAndActionOrderByCreatedAtDesc(
-                user.getEmail(), AuditAction.LOGIN_SUCCESS);
-
-        boolean isNewDeviceOrIp = true;
+        String deviceSignature = ipAddress + ":" + parseDevice(userAgent);
+        String redisKey = "known_devices:" + user.getId();
         
-        // We skip the very first one if it's the exact current login just inserted, 
-        // but checking 10 is usually enough to find a match if it's a returning device.
-        for (AuditLog log : previousLogins) {
-            // Give some buffer for the current login just being recorded
-            if (log.getCreatedAt().isAfter(LocalDateTime.now().minusSeconds(10))) {
-                continue; 
-            }
-            if (ipAddress.equals(log.getIpAddress()) && userAgent.equals(log.getUserAgent())) {
-                isNewDeviceOrIp = false;
-                break;
-            }
-        }
+        // Add returns true (1L) if it's a new element, false (0L) if already exists
+        Long added = redisTemplate.opsForSet().add(redisKey, deviceSignature);
+        boolean isNewDeviceOrIp = (added != null && added > 0);
 
         if (isNewDeviceOrIp) {
-            // It strongly appears to be a new IP/Device combination.
             String location = fetchLocationFromIp(ipAddress);
             if (location != null) {
                 mailService.sendNewDeviceAlert(user.getEmail(), location, parseDevice(userAgent), LocalDateTime.now());
