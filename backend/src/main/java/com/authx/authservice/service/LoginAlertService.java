@@ -1,33 +1,27 @@
 package com.authx.authservice.service;
 
 import com.authx.authservice.entity.User;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
 import java.time.LocalDateTime;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Service
 public class LoginAlertService {
 
     private final MailService mailService;
     private final RestTemplate restTemplate;
-    private final RedisTemplate<String, Object> redisTemplate;
+    private final Map<Long, Set<String>> knownDevices = new ConcurrentHashMap<>();
 
-    @Autowired
-    public LoginAlertService(MailService mailService, RedisTemplate<String, Object> redisTemplate) {
+    public LoginAlertService(MailService mailService) {
         this.mailService = mailService;
-        this.redisTemplate = redisTemplate;
         this.restTemplate = new RestTemplate();
     }
 
-    /**
-     * Checks if this login is anomalous asynchronously.
-     * Uses Redis Sets for O(1) detection instead of MySQL.
-     */
     @Async
     public void checkAnomalousLogin(User user, String ipAddress, String userAgent) {
         if (ipAddress == null || ipAddress.isBlank()) {
@@ -35,11 +29,8 @@ public class LoginAlertService {
         }
 
         String deviceSignature = ipAddress + ":" + parseDevice(userAgent);
-        String redisKey = "known_devices:" + user.getId();
-        
-        // Add returns true (1L) if it's a new element, false (0L) if already exists
-        Long added = redisTemplate.opsForSet().add(redisKey, deviceSignature);
-        boolean isNewDeviceOrIp = (added != null && added > 0);
+        Set<String> devices = knownDevices.computeIfAbsent(user.getId(), k -> ConcurrentHashMap.newKeySet());
+        boolean isNewDeviceOrIp = devices.add(deviceSignature);
 
         if (isNewDeviceOrIp) {
             String location = fetchLocationFromIp(ipAddress);
