@@ -3,6 +3,8 @@ package com.authx.authservice.repository;
 import com.authx.authservice.entity.RefreshToken;
 import com.authx.authservice.entity.User;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
+import org.springframework.data.jpa.repository.Query;
 import org.springframework.stereotype.Repository;
 
 import java.time.LocalDateTime;
@@ -23,4 +25,8 @@ public interface RefreshTokenRepository extends JpaRepository<RefreshToken, Long
     );
 
     List<RefreshToken> findByRevokedAtIsNullAndExpiresAtAfterOrderByLastUsedAtDesc(LocalDateTime now);
+
+    @Modifying(clearAutomatically = true)
+    @Query("DELETE FROM RefreshToken r WHERE r.user = :user")
+    void deleteByUser(User user);
 }

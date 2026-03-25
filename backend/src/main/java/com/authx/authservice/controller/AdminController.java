@@ -7,6 +7,7 @@ import com.authx.authservice.dto.UserProfileResponse;
 import com.authx.authservice.entity.AuditLog;
 import com.authx.authservice.entity.RefreshToken;
 import com.authx.authservice.entity.User;
+import com.authx.authservice.repository.ActionTokenRepository;
 import com.authx.authservice.repository.RefreshTokenRepository;
 import com.authx.authservice.repository.UserRepository;
 import com.authx.authservice.service.AuditService;
@@ -15,6 +16,7 @@ import com.authx.authservice.service.RefreshTokenService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.data.domain.Page;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
@@ -30,6 +32,7 @@ public class AdminController {
 
     private final UserRepository userRepository;
     private final RefreshTokenRepository refreshTokenRepository;
+    private final ActionTokenRepository actionTokenRepository;
     private final RefreshTokenService refreshTokenService;
     private final AuditService auditService;
     private final AuthService authService;
@@ -121,6 +124,26 @@ public class AdminController {
             }
             default -> throw new IllegalArgumentException("Invalid lock type. Use 'temporary' or 'permanent'.");
         }
+    }
+
+    @Transactional
+    @DeleteMapping("/users/{userId}")
+    public Map<String, String> deleteUser(
+            @PathVariable Long userId,
+            Authentication authentication
+    ) {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new IllegalArgumentException("User not found."));
+
+        String adminEmail = authentication.getName();
+        if (adminEmail.equals(user.getEmail())) {
+            throw new IllegalArgumentException("You cannot delete your own account.");
+        }
+
+        refreshTokenRepository.deleteByUser(user);
+        actionTokenRepository.deleteByUser(user);
+        userRepository.delete(user);
+        return Map.of("message", "User deleted.");
     }
 
     private UserProfileResponse toProfileResponse(User user) {

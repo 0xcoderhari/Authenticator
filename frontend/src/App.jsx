@@ -10,21 +10,14 @@ function App() {
   const [mode, setMode] = useState(() => getInitialMode());
   const [dashTab, setDashTab] = useState("profile");
   const [signupForm, setSignupForm] = useState(initialSignup);
-  const [loginForm, setLoginForm] = useState(() => ({
-    ...initialLogin,
-    email: localStorage.getItem("auth_email") || "",
-  }));
-  const [forgotPasswordEmail, setForgotPasswordEmail] = useState(
-    () => localStorage.getItem("auth_email") || "",
-  );
+  const [loginForm, setLoginForm] = useState(initialLogin);
+  const [forgotPasswordEmail, setForgotPasswordEmail] = useState("");
   const [resetForm, setResetForm] = useState(initialReset);
   const [verificationToken, setVerificationToken] = useState(() => getQueryToken("verify"));
   const [resetToken, setResetToken] = useState(() => getQueryToken("reset"));
   const [magicToken, setMagicToken] = useState(() => getQueryToken("magic"));
   const [currentUser, setCurrentUser] = useState(null);
-  const [accountEmail, setAccountEmail] = useState(
-    () => localStorage.getItem("auth_email") || "",
-  );
+  const [accountEmail, setAccountEmail] = useState("");
   const [authMessage, setAuthMessage] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -89,11 +82,6 @@ function App() {
     if (mode === "magic-verify" && magicToken) void handleVerifyMagicLink();
   }, [mode, verificationToken, magicToken]);
 
-  useEffect(() => {
-    if (accountEmail) localStorage.setItem("auth_email", accountEmail);
-    else localStorage.removeItem("auth_email");
-  }, [accountEmail]);
-
   // Auto-refresh access token
   useEffect(() => {
     if (!isAuthenticated) return;
@@ -103,7 +91,7 @@ function App() {
           method: "POST", credentials: "include",
         });
         if (!res.ok) {
-          clearAuthenticatedUser(currentUser?.email || accountEmail);
+          clearAuthenticatedUser();
           setMode("login");
         }
       } catch { /* ignore */ }
@@ -212,7 +200,7 @@ function App() {
         setAuthMessage(data.message || "Signed in.");
       }
     } catch (err) {
-      clearAuthenticatedUser(loginForm.email || accountEmail);
+      clearAuthenticatedUser();
       setError(err.message);
     } finally { setLoading(false); }
   }
@@ -379,7 +367,7 @@ function App() {
     setLoading(true); setError("");
     try {
       await fetch(buildApiUrl("/api/auth/logout"), { method: "POST", credentials: "include" });
-      clearAuthenticatedUser(currentUser?.email || accountEmail);
+      clearAuthenticatedUser();
       setAuthMessage("Signed out.");
       setMode("login");
       setDashTab("profile");
@@ -484,7 +472,7 @@ function App() {
         method: "POST", credentials: "include",
       });
       if (res.ok) {
-        clearAuthenticatedUser(currentUser?.email || accountEmail);
+        clearAuthenticatedUser();
         setAuthMessage("All sessions logged out.");
         setMode("login");
         setDashTab("profile");
@@ -497,7 +485,10 @@ function App() {
     try {
       const qs = adminUserQuery ? `?q=${encodeURIComponent(adminUserQuery.trim())}` : "";
       const res = await fetch(buildApiUrl(`/api/admin/users${qs}`), { credentials: "include" });
-      if (res.ok) setAdminUsers(await res.json());
+      if (res.ok) {
+        const data = await res.json();
+        setAdminUsers(data.filter(u => u.email !== currentUser?.email));
+      }
     } catch { /* ignore */ } finally { setDashLoading(false); }
   }
 
@@ -563,6 +554,20 @@ function App() {
     } catch { /* ignore */ }
   }
 
+  async function deleteUser(userId) {
+    if (!window.confirm("Delete this user? This action cannot be undone.")) return;
+    try {
+      const res = await fetch(buildApiUrl(`/api/admin/users/${userId}`), {
+        method: "DELETE", credentials: "include",
+      });
+      if (res.ok) void loadAdminUsers();
+      else {
+        const data = await parseResponse(res);
+        setError(extractErrorMessage(data));
+      }
+    } catch { /* ignore */ }
+  }
+
   async function fetchProfile() {
     const res = await fetch(buildApiUrl("/api/user/profile"), { credentials: "include" });
     if (!res.ok) return null;
@@ -592,20 +597,14 @@ function App() {
     }
   }
 
-  function clearAuthenticatedUser(nextEmail = "") {
-    const email = normalizeEmail(nextEmail || accountEmail || "");
+  function clearAuthenticatedUser() {
+    localStorage.removeItem("auth_email");
     setCurrentUser(null);
     setProfile(null);
     setSessions([]);
-    if (email) {
-      setAccountEmail(email);
-      setForgotPasswordEmail(email);
-      setLoginForm({ ...initialLogin, email });
-    } else {
-      setAccountEmail("");
-      setForgotPasswordEmail("");
-      setLoginForm(initialLogin);
-    }
+    setAccountEmail("");
+    setForgotPasswordEmail("");
+    setLoginForm(initialLogin);
   }
 
   // ─── Render ───
@@ -614,7 +613,7 @@ function App() {
       <div className="page-shell">
         <div className="backdrop backdrop-left" />
         <div className="backdrop backdrop-right" />
-        <div className="dashboard-shell">
+        <div className={`dashboard-shell${dashTab === "admin-logs" ? " dashboard-shell--wide" : ""}`}>
           {/* Top Bar */}
           <div className="top-bar">
             <div className="top-bar-left">
@@ -655,59 +654,85 @@ function App() {
 
           {/* Profile Tab */}
           {dashTab === "profile" && (
-            <div className="content-card animate-in">
-              <div className="card-header">
-                <div>
-                  <h2 className="card-title">Your Profile</h2>
-                  <p className="card-subtitle">Account details and information</p>
+            <div className="animate-in" style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+              {/* Profile Hero */}
+              {profile && (
+                <div className="profile-hero">
+                  <div className="profile-hero__avatar">
+                    {profile.email?.charAt(0).toUpperCase()}
+                  </div>
+                  <div className="profile-hero__info">
+                    <h2 className="profile-hero__email">{profile.email}</h2>
+                    <div className="profile-hero__badges">
+                      <span className={`role-chip ${profile.role === "ADMIN" ? "admin" : ""}`}>{profile.role}</span>
+                      <span className={`status-badge ${profile.verified ? "verified" : "unverified"}`}>
+                        <span className="status-dot" />{profile.verified ? "Verified" : "Unverified"}
+                      </span>
+                      {profile.twoFactorEnabled && (
+                        <span className="status-badge verified"><span className="status-dot" />2FA On</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="profile-hero__meta">
+                    <span className="profile-hero__label">Member since</span>
+                    <span className="profile-hero__value">{formatDate(profile.createdAt)}</span>
+                  </div>
                 </div>
-              </div>
+              )}
+
+              {/* Account Details + Security side by side */}
               {dashLoading ? <div className="loading-pulse">Loading profile...</div> : profile ? (
-                <>
-                  <div className="profile-grid">
-                    <div className="profile-item">
-                      <span className="profile-label">Email</span>
-                      <span className="profile-value">{profile.email}</span>
+                <div className="profile-columns">
+                  {/* Account Details */}
+                  <div className="content-card">
+                    <h3 className="card-title" style={{ marginBottom: "1.25rem" }}>Account Details</h3>
+                    <div className="profile-detail-row">
+                      <span className="profile-detail-label">Email</span>
+                      <span className="profile-detail-value">{profile.email}</span>
                     </div>
-                    <div className="profile-item">
-                      <span className="profile-label">Role</span>
-                      <span className="profile-value">{profile.role}</span>
+                    <div className="profile-detail-row">
+                      <span className="profile-detail-label">User ID</span>
+                      <span className="profile-detail-value" style={{ fontFamily: "monospace" }}>{profile.id}</span>
                     </div>
-                    <div className="profile-item">
-                      <span className="profile-label">Status</span>
-                      <span className="profile-value">
+                    <div className="profile-detail-row">
+                      <span className="profile-detail-label">Role</span>
+                      <span className="profile-detail-value">{profile.role}</span>
+                    </div>
+                    <div className="profile-detail-row">
+                      <span className="profile-detail-label">Status</span>
+                      <span className="profile-detail-value">
                         <span className={`status-badge ${profile.verified ? "verified" : "unverified"}`}>
-                          <span className="status-dot" />
-                          {profile.verified ? "Verified" : "Unverified"}
+                          <span className="status-dot" />{profile.verified ? "Verified" : "Unverified"}
                         </span>
                       </span>
                     </div>
-                    <div className="profile-item">
-                      <span className="profile-label">Member Since</span>
-                      <span className="profile-value">{formatDate(profile.createdAt)}</span>
+                    <div className="profile-detail-row">
+                      <span className="profile-detail-label">Created</span>
+                      <span className="profile-detail-value">{formatDate(profile.createdAt)}</span>
                     </div>
                   </div>
-                  
-                  <div style={{ marginTop: '2rem' }}>
-                    <h3 className="card-title" style={{ marginBottom: '1rem', fontSize: '1.25rem' }}>Security Settings</h3>
-                    <div className="profile-item" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '1rem', background: 'var(--bg-main)', border: '1px solid var(--border)' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%', alignItems: 'center' }}>
+
+                  {/* Security Settings */}
+                  <div className="content-card">
+                    <h3 className="card-title" style={{ marginBottom: "1.25rem" }}>Security</h3>
+                    <div className="profile-detail-row" style={{ flexDirection: "column", alignItems: "flex-start", gap: "0.75rem" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", width: "100%", alignItems: "center" }}>
                         <div>
-                          <span className="profile-label">Two-Factor Authentication (2FA)</span>
-                          <p className="profile-value" style={{ marginTop: '0.25rem', fontSize: '0.9rem', color: 'var(--text-muted)' }}>
-                            {profile.twoFactorEnabled ? 'Enabled. Your account is secured with 2FA.' : 'Add an extra layer of security to your account.'}
+                          <span className="profile-detail-label">Two-Factor Authentication</span>
+                          <p style={{ margin: "0.25rem 0 0", fontSize: "0.85rem", color: "var(--text-soft)" }}>
+                            {profile.twoFactorEnabled ? "Your account is secured with 2FA." : "Add an extra layer of security."}
                           </p>
                         </div>
                         {profile.twoFactorEnabled ? (
                           <label className="toggle-switch" onClick={handleDisable2Fa}>
-                            <span className="toggle-label active">Enabled</span>
+                            <span className="toggle-label active">On</span>
                             <div className={`toggle-track ${!loading ? 'active' : ''}`} role="switch" aria-checked="true">
                               <div className={`toggle-thumb ${!loading ? 'active' : ''}`} />
                             </div>
                           </label>
                         ) : (
                           <label className="toggle-switch" onClick={() => !twoFactorSetup && handleGenerate2Fa()}>
-                            <span className="toggle-label">Disabled</span>
+                            <span className="toggle-label">Off</span>
                             <div className="toggle-track" role="switch" aria-checked="false">
                               <div className="toggle-thumb" />
                             </div>
@@ -716,14 +741,13 @@ function App() {
                       </div>
                       
                       {twoFactorSetup && !profile.twoFactorEnabled && (
-                        <div className="animate-in" style={{ marginTop: '1rem', padding: '1.5rem', background: 'var(--bg-elevated)', borderRadius: '8px', border: '1px solid var(--border)', width: '100%' }}>
-                          <p style={{ marginBottom: '1rem', fontWeight: 500 }}>1. Scan this QR code with your authenticator app (e.g., Google Authenticator, Authy):</p>
+                        <div className="animate-in" style={{ marginTop: '0.5rem', padding: '1.5rem', background: 'var(--bg-main)', borderRadius: '8px', border: '1px solid var(--border)', width: '100%' }}>
+                          <p style={{ marginBottom: '1rem', fontWeight: 500 }}>1. Scan this QR code with your authenticator app:</p>
                           <div style={{ background: '#fff', padding: '0.5rem', display: 'inline-block', borderRadius: '4px', marginBottom: '1rem' }}>
                             <img src={twoFactorSetup.qrCode} alt="2FA QR Code" style={{ width: '200px', height: '200px', display: 'block' }} />
                           </div>
-                          <p style={{ marginBottom: '0.5rem', fontFamily: 'monospace', fontSize: '0.9rem', color: 'var(--text-muted)' }}>Secret key: {twoFactorSetup.secret}</p>
-                          
-                          <p style={{ marginTop: '1.5rem', marginBottom: '0.75rem', fontWeight: 500 }}>2. Enter the 6-digit code generated by your app:</p>
+                          <p style={{ marginBottom: '0.5rem', fontFamily: 'monospace', fontSize: '0.9rem', color: 'var(--text-muted)' }}>Secret: {twoFactorSetup.secret}</p>
+                          <p style={{ marginTop: '1.5rem', marginBottom: '0.75rem', fontWeight: 500 }}>2. Enter the 6-digit code:</p>
                           <form onSubmit={handleEnable2Fa} style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
                             <input 
                               type="text" 
@@ -736,7 +760,7 @@ function App() {
                                 padding: '0.6rem 0.75rem', 
                                 borderRadius: '6px', 
                                 border: '1px solid var(--border)', 
-                                background: 'var(--bg-main)', 
+                                background: 'var(--bg-elevated)', 
                                 color: 'var(--text-main)', 
                                 width: '120px',
                                 fontSize: '1.1rem',
@@ -751,7 +775,7 @@ function App() {
                       )}
                     </div>
                   </div>
-                </>
+                </div>
               ) : (
                 <div className="empty-state">
                   <p className="empty-state-text">Unable to load profile.</p>
@@ -781,23 +805,31 @@ function App() {
                   <p className="empty-state-text">No active sessions found.</p>
                 </div>
               ) : (
-                <div className="session-list">
+                <div className="session-grid">
                   {sessions.map(s => (
                     <div key={s.sessionId} className={`session-card ${s.current ? "current" : ""}`}>
-                      <div className="session-info">
-                        <p className="session-device">
-                          {parseDevice(s.userAgent)}
+                      <div className="session-card__icon">
+                        {parseDevice(s.userAgent)?.includes("Windows") ? "💻" :
+                         parseDevice(s.userAgent)?.includes("Mac") ? "🍎" :
+                         parseDevice(s.userAgent)?.includes("iPhone") || parseDevice(s.userAgent)?.includes("iOS") ? "📱" :
+                         parseDevice(s.userAgent)?.includes("Android") ? "📱" :
+                         parseDevice(s.userAgent)?.includes("Linux") ? "🐧" : "🌐"}
+                      </div>
+                      <div className="session-card__body">
+                        <div className="session-card__header">
+                          <p className="session-device">
+                            {parseDevice(s.userAgent)}
+                          </p>
                           {s.current && <span className="current-badge">This device</span>}
-                        </p>
-                        <p className="session-meta">
-                          IP: {s.ipAddress || "—"}<br />
-                          Created: {formatDate(s.createdAt)}<br />
-                          Last used: {formatDate(s.lastUsedAt)}<br />
-                          Expires: {formatDate(s.expiresAt)}
-                        </p>
+                        </div>
+                        <div className="session-card__meta">
+                          <span>IP: {s.ipAddress || "—"}</span>
+                          <span>Last active: {formatDate(s.lastUsedAt)}</span>
+                          <span>Expires: {formatDate(s.expiresAt)}</span>
+                        </div>
                       </div>
                       <button
-                        className={s.current ? "ghost-button" : "danger-button"}
+                        className={s.current ? "ghost-button" : "action-btn action-btn--delete"}
                         onClick={() => s.current ? logout() : revokeSession(s.sessionId)}
                       >
                         {s.current ? "Sign out" : "Revoke"}
@@ -861,14 +893,17 @@ function App() {
                           </td>
                           <td>{formatDate(u.createdAt)}</td>
                           <td>
-                            {u.locked ? (
-                              <button className="secondary-button" onClick={() => unlockUser(u.id)}>Unlock</button>
-                            ) : (
-                              <div style={{ display: "flex", gap: "0.4rem" }}>
-                                <button className="danger-button" onClick={() => lockUser(u.id, "temporary", 15)}>Lock (15m)</button>
-                                <button className="danger-button" style={{ background: "#7f1d1d", borderColor: "#991b1b" }} onClick={() => lockUser(u.id, "permanent")}>Lock (permanent)</button>
-                              </div>
-                            )}
+                            <div className="action-buttons">
+                              {u.locked ? (
+                                <button className="action-btn action-btn--unlock" onClick={() => unlockUser(u.id)}>Unlock</button>
+                              ) : (
+                                <>
+                                  <button className="action-btn action-btn--lock" onClick={() => lockUser(u.id, "temporary", 15)}>Lock</button>
+                                  <button className="action-btn action-btn--lock-perm" onClick={() => lockUser(u.id, "permanent")}>Lock Perma</button>
+                                </>
+                              )}
+                              <button className="action-btn action-btn--delete" onClick={() => deleteUser(u.id)}>Delete</button>
+                            </div>
                           </td>
                         </tr>
                       ))}
@@ -911,7 +946,7 @@ function App() {
                           <td>{formatDate(s.lastUsedAt)}</td>
                           <td>{formatDate(s.expiresAt)}</td>
                           <td>
-                            <button className="danger-button" onClick={() => adminRevokeSession(s.sessionId)}>Revoke</button>
+                            <button className="action-btn action-btn--delete" onClick={() => adminRevokeSession(s.sessionId)}>Revoke</button>
                           </td>
                         </tr>
                       ))}
