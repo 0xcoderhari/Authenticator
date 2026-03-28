@@ -14,11 +14,13 @@ import java.util.concurrent.ConcurrentHashMap;
 public class LoginAlertService {
 
     private final MailService mailService;
+    private final EmailQueueProducer emailQueueProducer;
     private final RestTemplate restTemplate;
     private final Map<Long, Set<String>> knownDevices = new ConcurrentHashMap<>();
 
-    public LoginAlertService(MailService mailService) {
+    public LoginAlertService(MailService mailService, EmailQueueProducer emailQueueProducer) {
         this.mailService = mailService;
+        this.emailQueueProducer = emailQueueProducer;
         this.restTemplate = new RestTemplate();
     }
 
@@ -34,18 +36,19 @@ public class LoginAlertService {
 
         if (isNewDeviceOrIp) {
             String location = fetchLocationFromIp(ipAddress);
+            String device = parseDevice(userAgent);
+            LocalDateTime time = LocalDateTime.now();
+            
             if (location != null) {
-                mailService.sendNewDeviceAlert(user.getEmail(), location, parseDevice(userAgent), LocalDateTime.now());
+                mailService.queueNewDeviceAlert(user.getEmail(), location, device, time, emailQueueProducer);
             } else {
-                mailService.sendNewDeviceAlert(user.getEmail(), "Unknown Location (IP: " + ipAddress + ")", parseDevice(userAgent), LocalDateTime.now());
+                mailService.queueNewDeviceAlert(user.getEmail(), "Unknown Location (IP: " + ipAddress + ")", device, time, emailQueueProducer);
             }
         }
     }
 
     private String fetchLocationFromIp(String ipAddress) {
         try {
-            // Using a free IP geolocation API
-            // Note: in production, an API key or local GeoIP database is recommended.
             String url = "http://ip-api.com/json/" + ipAddress;
             Map<String, Object> response = restTemplate.getForObject(url, Map.class);
             if (response != null && "success".equals(response.get("status"))) {
@@ -54,7 +57,6 @@ public class LoginAlertService {
                 return city + ", " + country;
             }
         } catch (Exception e) {
-            // Ignore failure, we'll fall back to unknown location
         }
         return null;
     }

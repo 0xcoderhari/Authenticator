@@ -46,6 +46,7 @@ public class AuthService {
     private final BCryptPasswordEncoder passwordEncoder;
     private final JwtService jwtService;
     private final MailService mailService;
+    private final EmailQueueProducer emailQueueProducer;
     private final RefreshTokenService refreshTokenService;
     private final ActionTokenService actionTokenService;
     private final AuditService auditService;
@@ -80,11 +81,12 @@ public class AuthService {
                 .build();
 
         userRepository.save(user);
-        mailService.sendVerificationEmail(
+        mailService.queueVerificationEmail(
                 user.getEmail(),
                 actionTokenService.createEmailVerificationToken(user),
                 originHeader,
-                refererHeader
+                refererHeader,
+                emailQueueProducer
         );
 
         auditService.log(user.getId(), email, AuditAction.SIGNUP, ipAddress, userAgent);
@@ -165,11 +167,12 @@ public class AuthService {
 
         userRepository.findByEmail(email).ifPresent(user -> {
             if (!user.isVerified()) {
-                mailService.sendVerificationEmail(
+                mailService.queueVerificationEmail(
                         user.getEmail(),
                         actionTokenService.createEmailVerificationToken(user),
                         originHeader,
-                        refererHeader
+                        refererHeader,
+                        emailQueueProducer
                 );
             }
         });
@@ -181,11 +184,12 @@ public class AuthService {
                                  String refererHeader, String ipAddress, String userAgent) {
         String email = normalizeEmail(request.getEmail());
         Optional<User> user = userRepository.findByEmail(email);
-        user.ifPresent(existingUser -> mailService.sendPasswordResetEmail(
+        user.ifPresent(existingUser -> mailService.queuePasswordResetEmail(
                 existingUser.getEmail(),
                 actionTokenService.createPasswordResetToken(existingUser),
                 originHeader,
-                refererHeader
+                refererHeader,
+                emailQueueProducer
         ));
 
         return "If that email exists, a password reset link has been sent.";
@@ -195,11 +199,12 @@ public class AuthService {
                                  String refererHeader, String ipAddress, String userAgent) {
         String email = normalizeEmail(request.getEmail());
         Optional<User> user = userRepository.findByEmail(email);
-        user.ifPresent(existingUser -> mailService.sendMagicLinkEmail(
+        user.ifPresent(existingUser -> mailService.queueMagicLinkEmail(
                 existingUser.getEmail(),
                 actionTokenService.createMagicLinkToken(existingUser),
                 originHeader,
-                refererHeader
+                refererHeader,
+                emailQueueProducer
         ));
 
         return "If that email exists, a magic link has been sent.";
